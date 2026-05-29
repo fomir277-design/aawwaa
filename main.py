@@ -29,7 +29,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
 user_states = {}
-active_clients = {}  # Словарь для хранения активных клиентов (session_name -> Client)
+active_clients = {}
 
 def get_config_path(session_name):
     return os.path.join(CONFIGS_DIR, f"{session_name}.json")
@@ -74,18 +74,32 @@ async def handle_bot_message(client: Client, message: Message):
     if message.reply_markup and message.reply_markup.inline_keyboard:
         for row in message.reply_markup.inline_keyboard:
             for button in row:
-                if button.callback_data == "farm_claim":
+                cb_str = str(button.callback_data) if button.callback_data else ""
+                
+                if "farm_claim" in cb_str:
                     try:
-                        await message.click(button.callback_data)
-                        print(f"[{session_name}] Нажата кнопка 'Снять деньги с фермы'")
+                        # Прямой низкоуровневый запрос (бьет точно в цель)
+                        await client.request_callback_answer(
+                            chat_id=message.chat.id,
+                            message_id=message.id,
+                            callback_data=button.callback_data
+                        )
+                        print(f"[{session_name}] Успешно нажата инлайн-кнопка фермы")
                         asyncio.create_task(delayed_payment(client, session_name))
                     except Exception as e:
                         print(f"[{session_name}] Ошибка клика farm_claim: {e}")
                 
-                elif config.get("eday_enabled") and ("confirm_daily_claim" in str(button.callback_data) or "Забрать" in str(button.text)):
+                elif config.get("eday_enabled") and ("confirm_daily_claim" in cb_str or "Забрать" in str(button.text)):
                     try:
-                        await message.click(button.callback_data)
-                        print(f"[{session_name}] Забрана ежедневная награда")
+                        if button.callback_data:
+                            await client.request_callback_answer(
+                                chat_id=message.chat.id,
+                                message_id=message.id,
+                                callback_data=button.callback_data
+                            )
+                        else:
+                            await message.click(button.text) # Фолбэк на случай изменения кнопки
+                        print(f"[{session_name}] Успешно забрана ежедневная награда")
                     except Exception as e:
                         print(f"[{session_name}] Ошибка клика eday: {e}")
 
@@ -203,12 +217,11 @@ async def handle_user_commands(client: Client, message: Message):
         target_sess = parts[1]
         
         if target_sess == session_name:
-            await message.edit_text("❌ Самоубийство запрещено! Вы не можете удалить собственную сессию с этого же аккаунта. Используйте другой или удалите файл через панель.")
+            await message.edit_text("❌ Самоубийство запрещено! Вы не можете удалить собственную сессию с этого же аккаунта.")
             return
             
         deleted = False
         
-        # Останавливаем клиента, если он работает
         if target_sess in active_clients:
             try:
                 await active_clients[target_sess].stop()
@@ -217,13 +230,11 @@ async def handle_user_commands(client: Client, message: Message):
             del active_clients[target_sess]
             deleted = True
             
-        # Удаляем файл сессии
         sess_path = os.path.join(SESSIONS_DIR, f"{target_sess}.session")
         if os.path.exists(sess_path):
             os.remove(sess_path)
             deleted = True
             
-        # Удаляем конфиг
         conf_path = get_config_path(target_sess)
         if os.path.exists(conf_path):
             os.remove(conf_path)
@@ -319,8 +330,18 @@ async def init_existing_sessions():
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
+        
+        # Авто-удаление сломанного файла из прошлых версий, чтобы не валил логи
+        if s_name == "auth_manager_bot":
+            try:
+                os.remove(os.path.join(SESSIONS_DIR, f))
+                print("Удален старый мусорный файл auth_manager_bot.session")
+            except: pass
+            continue
+            
         if s_name == "master_bot":
             continue
+            
         print(f"Найдена существующая сессия: {s_name}. Запуск...")
         asyncio.create_task(launch_userbot_instance(s_name))
 
@@ -486,7 +507,6 @@ async def main():
         print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/или API_HASH!")
         return
 
-    # Запускаем сессии, созданные через строковые переменные (SESSION_STRING_*)
     session_envs = {k: v for k, v in os.environ.items() if k.startswith("SESSION_STRING")}
     for key, string_value in session_envs.items():
         if not string_value.strip():
@@ -518,7 +538,6 @@ async def main():
         except Exception as e:
             print(f"Ошибка инициализации {key}: {e}")
 
-    # Инициализируем локальные .session файлы из Volume
     asyncio.create_task(init_existing_sessions())
 
     if BOT_TOKEN:
