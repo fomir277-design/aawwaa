@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import asyncio
 import random
@@ -6,6 +7,9 @@ from datetime import datetime, timedelta
 import pytz
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import SessionPasswordNeeded, FloodWait, PhoneCodeInvalid, PhoneCodeExpired
+
+sys.stdout.reconfigure(line_buffering=True)
 
 DATA_DIR = "/data"
 SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
@@ -16,9 +20,12 @@ os.makedirs(CONFIGS_DIR, exist_ok=True)
 
 GAME_BOT = "phonegetcardsbot"
 
-# Get global API credentials from Railway Environment Variables
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
+user_states = {}
+active_session_names = set()
 
 def get_config_path(session_name):
     return os.path.join(CONFIGS_DIR, f"{session_name}.json")
@@ -49,6 +56,7 @@ async def delayed_payment(client: Client, session_name: str):
         user = config["target_user"]
         amount = config["target_amount"]
         await client.send_message(GAME_BOT, f"/pay {user} {amount} Майнинг ферма")
+        print(f"[{session_name}] Отправлен перевод {amount} для {user}")
 
 async def handle_bot_message(client: Client, message: Message):
     if not message.chat or message.chat.username != GAME_BOT:
@@ -65,6 +73,7 @@ async def handle_bot_message(client: Client, message: Message):
                 if button.callback_data == "farm_claim":
                     try:
                         await message.click(button.callback_data)
+                        print(f"[{session_name}] Нажата кнопка 'Снять деньги с фермы'")
                         asyncio.create_task(delayed_payment(client, session_name))
                     except Exception as e:
                         print(f"[{session_name}] Ошибка клика farm_claim: {e}")
@@ -72,6 +81,7 @@ async def handle_bot_message(client: Client, message: Message):
                 elif config.get("eday_enabled") and ("confirm_daily_claim" in str(button.callback_data) or "Забрать" in str(button.text)):
                     try:
                         await message.click(button.callback_data)
+                        print(f"[{session_name}] Забрана ежедневная награда")
                     except Exception as e:
                         print(f"[{session_name}] Ошибка клика eday: {e}")
 
@@ -131,7 +141,7 @@ async def tcard_worker(client: Client, session_name: str):
             if config.get("enabled") and config.get("tcard_enabled"):
                 await client.send_message(GAME_BOT, "ткарточка")
         except Exception as e:
-            print(f"Ошибка tcard_worker ({session_name}): {e}")
+            print(f"[{session_name}] Ошибка tcard_worker: {e}")
         await asyncio.sleep(187 * 60)
 
 async def daily_and_mining_worker(client: Client, session_name: str):
@@ -174,31 +184,20 @@ async def daily_and_mining_worker(client: Client, session_name: str):
                 
                 await client.send_message(GAME_BOT, "тмайнинг")
         except Exception as e:
-            print(f"Ошибка daily_and_mining_worker ({session_name}): {e}")
+            print(f"[{session_name}] Ошибка daily_and_mining_worker: {e}")
         await asyncio.sleep(60)
 
-async def main():
-    session_files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
-    if not session_files:
-        print(f"Файлы сессий не найдены в {SESSIONS_DIR}. Ожидание загрузки файлов...")
-        while True:
-            await asyncio.sleep(3600)
-            
-    drivers = []
-    for s_file in session_files:
-        s_name = s_file.replace(".session", "")
-        
-        client_kwargs = {
-            "name": s_name,
-            "workdir": SESSIONS_DIR,
-            "plugins": None
-        }
-        if API_ID:
-            client_kwargs["api_id"] = int(API_ID) if API_ID.isdigit() else API_ID
-        if API_HASH:
-            client_kwargs["api_hash"] = API_HASH
-            
-        client = Client(**client_kwargs)
+async def launch_userbot_instance(session_name):
+    if session_name in active_session_names:
+        return
+    try:
+        client = Client(
+            name=session_name,
+            workdir=SESSIONS_DIR,
+            api_id=int(API_ID),
+            api_hash=API_HASH,
+            plugins=None
+        )
         
         @client.on_message(filters.me)
         async def u_handler(c, m):
@@ -208,15 +207,130 @@ async def main():
         async def b_handler(c, m):
             await handle_bot_message(c, m)
             
-        drivers.append((client, s_name))
-        
-    for client, s_name in drivers:
-        print(f"Запуск сессии: {s_name}")
         await client.start()
-        asyncio.create_task(tcard_worker(client, s_name))
-        asyncio.create_task(daily_and_mining_worker(client, s_name))
-        
-    print("Все активные юзерботы запущены.")
+        asyncio.create_task(tcard_worker(client, session_name))
+        asyncio.create_task(daily_and_mining_worker(client, session_name))
+        active_session_names.add(session_name)
+        print(f" Юзербот {session_name} успешно запущен в работу!")
+    except Exception as e:
+        print(f"Ошибка при старте юзербота {session_name}: {e}")
+
+async def init_existing_sessions():
+    await asyncio.sleep(2)
+    files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
+    for f in files:
+        s_name = f.replace(".session", "")
+        print(f"Найдена существующая сессия: {s_name}. Запуск...")
+        asyncio.create_task(launch_userbot_instance(s_name))
+
+def setup_bot_handlers(bot: Client):
+    @bot.on_message(filters.command("start") & filters.private)
+    async def start_cmd(c, m):
+        user_states[m.chat.id] = {"step": "IDLE"}
+        await m.reply_text("Привет! Отправь мне номер телефона аккаунта для авторизации юзербота в международном формате (например, +79991234567).")
+
+    @bot.on_message(filters.text & filters.private)
+    async def process_auth(c, m):
+        chat_id = m.chat.id
+        text = m.text.strip()
+        state = user_states.get(chat_id, {"step": "IDLE"})
+        step = state.get("step")
+
+        if step == "IDLE":
+            if text.startswith("+") and len(text) > 9:
+                phone = text.replace(" ", "")
+                session_name = f"user_{phone.replace('+', '')}"
+                
+                await m.reply_text("Связываюсь с серверами Telegram, ожидайте...")
+                
+                client = Client(
+                    name=session_name,
+                    workdir=SESSIONS_DIR,
+                    api_id=int(API_ID),
+                    api_hash=API_HASH,
+                    in_memory=False
+                )
+                try:
+                    await client.connect()
+                    code_info = await client.send_code(phone)
+                    
+                    user_states[chat_id] = {
+                        "step": "WAIT_CODE",
+                        "phone": phone,
+                        "session_name": session_name,
+                        "client": client,
+                        "phone_code_hash": code_info.phone_code_hash
+                    }
+                    await m.reply_text("Telegram отправил тебе код. Введи код авторизации в чат. (Если код содержит пробел, удали его).")
+                except FloodWait as e:
+                    await m.reply_text(f"Ошибка лимита запросов. Подожди {e.value} секунд.")
+                    await client.disconnect()
+                except Exception as e:
+                    await m.reply_text(f"Произошла ошибка при отправке кода: {e}")
+                    await client.disconnect()
+            else:
+                await m.reply_text("Неверный формат номера. Отправь номер телефона, начиная с +")
+
+        elif step == "WAIT_CODE":
+            client = state["client"]
+            phone = state["phone"]
+            phone_code_hash = state["phone_code_hash"]
+            session_name = state["session_name"]
+            
+            try:
+                await client.sign_in(phone, phone_code_hash, text)
+                await m.reply_text("Авторизация успешна! Файл сессии сохранен в Volume.")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+                asyncio.create_task(launch_userbot_instance(session_name))
+            except SessionPasswordNeeded:
+                user_states[chat_id]["step"] = "WAIT_PASSWORD"
+                await m.reply_text("На аккаунте включен облачный пароль (2FA). Отправь свой пароль в чат:")
+            except (PhoneCodeInvalid, PhoneCodeExpired):
+                await m.reply_text("Неверный или просроченный код. Попробуй заново через /start")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+            except Exception as e:
+                await m.reply_text(f"Ошибка при авторизации: {e}")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+
+        elif step == "WAIT_PASSWORD":
+            client = state["client"]
+            session_name = state["session_name"]
+            try:
+                await client.check_password(text)
+                await m.reply_text("Пароль принят! Авторизация успешна. Файл сессии сохранен в Volume.")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+                asyncio.create_task(launch_userbot_instance(session_name))
+            except Exception as e:
+                await m.reply_text(f"Неверный пароль или ошибка: {e}. Попробуй процедуру заново через /start")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+
+async def main():
+    if not API_ID or not API_HASH:
+        print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/OR API_HASH!")
+        return
+
+    asyncio.create_task(init_existing_sessions())
+
+    if BOT_TOKEN:
+        print("Запуск главного Сервисного Бот-Интерфейса...")
+        bot_client = Client(
+            name="auth_manager_bot",
+            api_id=int(API_ID),
+            api_hash=API_HASH,
+            bot_token=BOT_TOKEN,
+            workdir=SESSIONS_DIR
+        )
+        setup_bot_handlers(bot_client)
+        await bot_client.start()
+        print("Сервисный бот онлайн и готов принимать авторизации.")
+    else:
+        print("Внимание: Переменная BOT_TOKEN пуста. Добавление сессий через чат отключено.")
+
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
