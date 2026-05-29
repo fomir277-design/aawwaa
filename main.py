@@ -3,6 +3,8 @@ import sys
 import json
 import asyncio
 import random
+import time
+import platform
 from datetime import datetime, timedelta
 import pytz
 from pyrogram import Client, filters
@@ -10,6 +12,8 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.errors import SessionPasswordNeeded, FloodWait, PhoneCodeInvalid, PhoneCodeExpired
 
 sys.stdout.reconfigure(line_buffering=True)
+
+START_TIME = time.time()
 
 DATA_DIR = "/data"
 SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
@@ -25,7 +29,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
 user_states = {}
-active_session_names = set()
+active_clients = {}  # Словарь для хранения активных клиентов (session_name -> Client)
 
 def get_config_path(session_name):
     return os.path.join(CONFIGS_DIR, f"{session_name}.json")
@@ -90,25 +94,27 @@ async def handle_user_commands(client: Client, message: Message):
         return
         
     text = message.text.strip()
+    parts = text.split()
+    if not parts:
+        return
+        
+    command = parts[0].lower()
     session_name = client.name
     config = load_config(session_name)
     
-    if text in [".on", ".вкл"]:
+    if command in [".on", ".вкл"]:
         config["enabled"] = True
         save_config(session_name, config)
-        await message.reply_text("Юзербот включен.")
+        await message.edit_text("✅ **Юзербот включен** и готов к работе.")
         return
-    elif text in [".off", ".выкл"]:
+        
+    elif command in [".off", ".выкл"]:
         config["enabled"] = False
         save_config(session_name, config)
-        await message.reply_text("Юзербот выключен.")
+        await message.edit_text("❌ **Юзербот выключен**.")
         return
         
-    if not config["enabled"]:
-        return
-        
-    if text.startswith((".target", ".цель")):
-        parts = text.split()
+    elif command in [".target", ".цель"]:
         if len(parts) == 3:
             target_user = parts[1]
             try:
@@ -116,23 +122,116 @@ async def handle_user_commands(client: Client, message: Message):
                 config["target_user"] = target_user
                 config["target_amount"] = target_amount
                 save_config(session_name, config)
-                await message.reply_text(f"Настройка сохранена: цель {target_user}, сумма {target_amount}")
+                await message.edit_text(f"✅ **Настройки перевода сохранены:**\n🎯 Цель: {target_user}\n💰 Сумма: {target_amount}")
             except ValueError:
-                await message.reply_text("Сумма перевода должна быть числом.")
+                await message.edit_text("❌ Ошибка: Сумма перевода должна быть числом.")
         else:
-            await message.reply_text("Формат команды: .цель @user X")
+            await message.edit_text("⚠️ Формат команды: `.цель @username X`")
             
-    elif text in [".tcard", ".ткарточка"]:
+    elif command in [".tcard", ".ткарточка"]:
         config["tcard_enabled"] = not config.get("tcard_enabled", False)
         save_config(session_name, config)
-        status = "включена" if config["tcard_enabled"] else "выключена"
-        await message.reply_text(f"Отправка 'ткарточка' каждые 187 минут {status}.")
+        status = "✅ включена" if config["tcard_enabled"] else "❌ выключена"
+        await message.edit_text(f"🃏 Авто-отправка 'ткарточка' каждые 187 минут: {status}.")
         
-    elif text in [".eday", ".ежедн"]:
+    elif command in [".eday", ".ежедн"]:
         config["eday_enabled"] = not config.get("eday_enabled", False)
         save_config(session_name, config)
-        status = "включен" if config["eday_enabled"] else "выключен"
-        await message.reply_text(f"Автосбор ежедневной награды {status}.")
+        status = "✅ включен" if config["eday_enabled"] else "❌ выключен"
+        await message.edit_text(f"🎁 Автосбор ежедневной награды: {status}.")
+        
+    elif command in [".debug", ".дебаг"]:
+        req_start = time.time()
+        await message.edit_text("⏳ Сбор данных для дебага...")
+        
+        ping_ms = round((time.time() - req_start) * 1000)
+        uptime_sec = int(time.time() - START_TIME)
+        u_h = uptime_sec // 3600
+        u_m = (uptime_sec % 3600) // 60
+        u_s = uptime_sec % 60
+        
+        target = config.get("target_user") or "❌ не задана"
+        amount = config.get("target_amount") or "❌ не задана"
+        tcard_st = "✅ вкл" if config.get("tcard_enabled") else "❌ выкл"
+        eday_st = "✅ вкл" if config.get("eday_enabled") else "❌ выкл"
+        bot_st = "✅ включен" if config.get("enabled") else "❌ выключен"
+        
+        sess_list = "\n".join([f"• `{name}`" for name in active_clients.keys()])
+        if not sess_list:
+            sess_list = "• Нет активных сессий"
+            
+        debug_text = f"""🛠 **PGUB Debug Info**
+───────────────────
+⏱️ **Аптайм:** {u_h}ч {u_m}м {u_s}с
+📡 **Telegram Ping:** {ping_ms} ms
+🐍 **Python:** {sys.version.split()[0]}
+🖥 **Платформа:** {platform.system()} {platform.release()}
+───────────────────
+⚙️ **Настройки ({session_name}):**
+  🤖 Статус бота: {bot_st}
+  🎯 Цель перевода: {target}
+  💰 Сумма перевода: {amount}
+  🃏 ТКарточка: {tcard_st}
+  🎁 Ежедн. награда: {eday_st}
+
+📁 **Активные сессии на сервере:**
+{sess_list}"""
+        await message.edit_text(debug_text)
+        
+    elif command in [".help", ".помощь", ".справка"]:
+        help_text = """📋 **Справка по командам PGUB**
+───────────────────
+`.вкл` / `.выкл` — включить/выключить бота
+`.ткарточка` — авто-карточка (раз в 187 мин)
+`.ежедн` — ежедневный бонус
+`.target @username <сумма>` — цель и сумма для перевода
+`.дебаг` — ваши настройки и статус бота
+`.сессии` — список активных сессий
+`.удалитьсессию <имя>` — удалить сессию с сервера
+`.помощь` — эта справка"""
+        await message.edit_text(help_text)
+        
+    elif command in [".sessions", ".сессии"]:
+        sess_list = "\n".join([f"• `{name}`" for name in active_clients.keys()])
+        await message.edit_text(f"📁 **Активные сессии в памяти:**\n{sess_list}")
+        
+    elif command in [".delsession", ".удалитьсессию"]:
+        if len(parts) < 2:
+            await message.edit_text("❌ Укажите имя сессии.\nПример: `.удалитьсессию user_79991234567`")
+            return
+            
+        target_sess = parts[1]
+        
+        if target_sess == session_name:
+            await message.edit_text("❌ Самоубийство запрещено! Вы не можете удалить собственную сессию с этого же аккаунта. Используйте другой или удалите файл через панель.")
+            return
+            
+        deleted = False
+        
+        # Останавливаем клиента, если он работает
+        if target_sess in active_clients:
+            try:
+                await active_clients[target_sess].stop()
+            except Exception:
+                pass
+            del active_clients[target_sess]
+            deleted = True
+            
+        # Удаляем файл сессии
+        sess_path = os.path.join(SESSIONS_DIR, f"{target_sess}.session")
+        if os.path.exists(sess_path):
+            os.remove(sess_path)
+            deleted = True
+            
+        # Удаляем конфиг
+        conf_path = get_config_path(target_sess)
+        if os.path.exists(conf_path):
+            os.remove(conf_path)
+            
+        if deleted:
+            await message.edit_text(f"✅ Успешно. Сессия `{target_sess}` остановлена и удалена с сервера.")
+        else:
+            await message.edit_text(f"⚠️ Ошибка: Сессия `{target_sess}` не найдена.")
 
 async def tcard_worker(client: Client, session_name: str):
     while True:
@@ -188,7 +287,7 @@ async def daily_and_mining_worker(client: Client, session_name: str):
         await asyncio.sleep(60)
 
 async def launch_userbot_instance(session_name):
-    if session_name in active_session_names:
+    if session_name in active_clients:
         return
     try:
         client = Client(
@@ -208,9 +307,9 @@ async def launch_userbot_instance(session_name):
             await handle_bot_message(c, m)
             
         await client.start()
+        active_clients[session_name] = client
         asyncio.create_task(tcard_worker(client, session_name))
         asyncio.create_task(daily_and_mining_worker(client, session_name))
-        active_session_names.add(session_name)
         print(f"Юзербот {session_name} успешно запущен в работу!")
     except Exception as e:
         print(f"Ошибка при старте юзербота {session_name}: {e}")
@@ -235,7 +334,6 @@ def get_pin_keyboard():
     ])
 
 def format_code_display(code: str):
-    # Форматируем как "1 2 3 ⚪️ ⚪️"
     display = " ".join(list(code))
     if len(code) < 5:
         if len(code) > 0:
@@ -299,7 +397,6 @@ def setup_bot_handlers(bot: Client):
                 await m.reply_text("Неверный формат номера. Отправь номер телефона, начиная с `+`")
 
         elif step == "WAIT_CODE":
-            # Игнорируем текстовые сообщения на этапе ожидания кода, чтобы заставить использовать кнопки
             message = await m.reply_text("⚠️ Пожалуйста, используй кнопки выше для безопасного ввода кода.")
             await asyncio.sleep(3)
             await message.delete()
@@ -389,6 +486,39 @@ async def main():
         print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/или API_HASH!")
         return
 
+    # Запускаем сессии, созданные через строковые переменные (SESSION_STRING_*)
+    session_envs = {k: v for k, v in os.environ.items() if k.startswith("SESSION_STRING")}
+    for key, string_value in session_envs.items():
+        if not string_value.strip():
+            continue
+        s_name = key.lower()
+        if s_name in active_clients:
+            continue
+        try:
+            client = Client(
+                name=s_name,
+                session_string=string_value.strip(),
+                api_id=int(API_ID),
+                api_hash=API_HASH,
+                plugins=None,
+                in_memory=True
+            )
+            @client.on_message(filters.me)
+            async def u_handler(c, m):
+                await handle_user_commands(c, m)
+            @client.on_message(filters.chat(GAME_BOT))
+            async def b_handler(c, m):
+                await handle_bot_message(c, m)
+                
+            await client.start()
+            active_clients[s_name] = client
+            asyncio.create_task(tcard_worker(client, s_name))
+            asyncio.create_task(daily_and_mining_worker(client, s_name))
+            print(f"Аккаунт из переменных {s_name} запущен.")
+        except Exception as e:
+            print(f"Ошибка инициализации {key}: {e}")
+
+    # Инициализируем локальные .session файлы из Volume
     asyncio.create_task(init_existing_sessions())
 
     if BOT_TOKEN:
@@ -405,7 +535,7 @@ async def main():
             await bot_client.start()
             print("Сервисный бот онлайн и готов принимать авторизации.")
         except Exception as e:
-             print(f"КРИТИЧЕСКАЯ ОШИБКА СЕРВИСНОГО БОТА (Скорее всего неверный BOT_TOKEN): {e}")
+             print(f"КРИТИЧЕСКАЯ ОШИБКА СЕРВИСНОГО БОТА: {e}")
     else:
         print("Внимание: Переменная BOT_TOKEN пуста. Добавление сессий через чат отключено.")
 
