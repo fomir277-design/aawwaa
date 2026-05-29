@@ -6,7 +6,7 @@ import random
 from datetime import datetime, timedelta
 import pytz
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import SessionPasswordNeeded, FloodWait, PhoneCodeInvalid, PhoneCodeExpired
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -220,12 +220,28 @@ async def init_existing_sessions():
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
-        # ЖЕСТКОЕ ИСКЛЮЧЕНИЕ: не пытаемся запустить сервисного бота как юзербота
         if s_name == "master_bot":
             continue
-            
         print(f"Найдена существующая сессия: {s_name}. Запуск...")
         asyncio.create_task(launch_userbot_instance(s_name))
+
+def get_pin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1", callback_data="pin_1"), InlineKeyboardButton("2", callback_data="pin_2"), InlineKeyboardButton("3", callback_data="pin_3")],
+        [InlineKeyboardButton("4", callback_data="pin_4"), InlineKeyboardButton("5", callback_data="pin_5"), InlineKeyboardButton("6", callback_data="pin_6")],
+        [InlineKeyboardButton("7", callback_data="pin_7"), InlineKeyboardButton("8", callback_data="pin_8"), InlineKeyboardButton("9", callback_data="pin_9")],
+        [InlineKeyboardButton("⬅️", callback_data="pin_del"), InlineKeyboardButton("0", callback_data="pin_0"), InlineKeyboardButton("🗑", callback_data="pin_clear")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="pin_cancel")]
+    ])
+
+def format_code_display(code: str):
+    # Форматируем как "1 2 3 ⚪️ ⚪️"
+    display = " ".join(list(code))
+    if len(code) < 5:
+        if len(code) > 0:
+            display += " "
+        display += " ".join(["⚪️"] * (5 - len(code)))
+    return display
 
 def setup_bot_handlers(bot: Client):
     @bot.on_message(filters.command("start") & filters.private)
@@ -245,7 +261,7 @@ def setup_bot_handlers(bot: Client):
                 phone = text.replace(" ", "")
                 session_name = f"user_{phone.replace('+', '')}"
                 
-                await m.reply_text("Связываюсь с серверами Telegram, ожидайте...")
+                await m.reply_text("Связываюсь с серверами Telegram, ожидайте... ⏳")
                 
                 client = Client(
                     name=session_name,
@@ -263,55 +279,110 @@ def setup_bot_handlers(bot: Client):
                         "phone": phone,
                         "session_name": session_name,
                         "client": client,
-                        "phone_code_hash": code_info.phone_code_hash
+                        "phone_code_hash": code_info.phone_code_hash,
+                        "entered_code": ""
                     }
-                    await m.reply_text("Telegram отправил тебе код. Введи код авторизации в чат. (Если код содержит пробел, удали его).")
+                    
+                    await m.reply_text(
+                        f"📲 Telegram отправил код на номер {phone}.\n\n"
+                        f"**Код:** {format_code_display('')}\n\n"
+                        f"Используй клавиатуру ниже для ввода:",
+                        reply_markup=get_pin_keyboard()
+                    )
                 except FloodWait as e:
-                    await m.reply_text(f"Ошибка лимита запросов. Подожди {e.value} секунд.")
+                    await m.reply_text(f"⚠️ Ошибка лимита запросов. Подожди {e.value} секунд.")
                     await client.disconnect()
                 except Exception as e:
-                    await m.reply_text(f"Произошла ошибка при отправке кода: {e}")
+                    await m.reply_text(f"❌ Произошла ошибка при отправке кода: {e}")
                     await client.disconnect()
             else:
-                await m.reply_text("Неверный формат номера. Отправь номер телефона, начиная с +")
+                await m.reply_text("Неверный формат номера. Отправь номер телефона, начиная с `+`")
 
         elif step == "WAIT_CODE":
-            client = state["client"]
-            phone = state["phone"]
-            phone_code_hash = state["phone_code_hash"]
-            session_name = state["session_name"]
-            
-            try:
-                await client.sign_in(phone, phone_code_hash, text)
-                await m.reply_text("Авторизация успешна! Файл сессии сохранен в Volume, юзербот запущен.")
-                await client.disconnect()
-                user_states[chat_id] = {"step": "IDLE"}
-                asyncio.create_task(launch_userbot_instance(session_name))
-            except SessionPasswordNeeded:
-                user_states[chat_id]["step"] = "WAIT_PASSWORD"
-                await m.reply_text("На аккаунте включен облачный пароль (2FA). Отправь свой пароль в чат:")
-            except (PhoneCodeInvalid, PhoneCodeExpired):
-                await m.reply_text("Неверный или просроченный код. Попробуй заново через /start")
-                await client.disconnect()
-                user_states[chat_id] = {"step": "IDLE"}
-            except Exception as e:
-                await m.reply_text(f"Ошибка при авторизации: {e}")
-                await client.disconnect()
-                user_states[chat_id] = {"step": "IDLE"}
+            # Игнорируем текстовые сообщения на этапе ожидания кода, чтобы заставить использовать кнопки
+            message = await m.reply_text("⚠️ Пожалуйста, используй кнопки выше для безопасного ввода кода.")
+            await asyncio.sleep(3)
+            await message.delete()
 
         elif step == "WAIT_PASSWORD":
             client = state["client"]
             session_name = state["session_name"]
             try:
                 await client.check_password(text)
-                await m.reply_text("Пароль принят! Авторизация успешна. Файл сессии сохранен в Volume, юзербот запущен.")
+                await m.reply_text("✅ Пароль принят! Авторизация успешна. Юзербот запущен.")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
                 asyncio.create_task(launch_userbot_instance(session_name))
             except Exception as e:
-                await m.reply_text(f"Неверный пароль или ошибка: {e}. Попробуй заново через /start")
+                await m.reply_text(f"❌ Неверный пароль или ошибка: {e}. Попробуй заново через /start")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
+
+    @bot.on_callback_query(filters.regex(r"^pin_"))
+    async def pin_callback(c, cq: CallbackQuery):
+        chat_id = cq.message.chat.id
+        state = user_states.get(chat_id)
+        
+        if not state or state.get("step") != "WAIT_CODE":
+            await cq.answer("Код больше не ожидается. Начни заново через /start", show_alert=True)
+            return
+            
+        action = cq.data.split("_")[1]
+        current_code = state.get("entered_code", "")
+        client = state["client"]
+        
+        if action == "cancel":
+            await client.disconnect()
+            user_states[chat_id] = {"step": "IDLE"}
+            await cq.message.edit_text("🛑 Авторизация отменена.")
+            return
+            
+        elif action == "clear":
+            current_code = ""
+        elif action == "del":
+            current_code = current_code[:-1]
+        elif action.isdigit():
+            if len(current_code) < 5:
+                current_code += action
+
+        state["entered_code"] = current_code
+        
+        if len(current_code) == 5:
+            await cq.message.edit_text(f"🔐 Проверка кода: {format_code_display(current_code)} ...")
+            
+            try:
+                phone = state["phone"]
+                phone_code_hash = state["phone_code_hash"]
+                session_name = state["session_name"]
+                
+                await client.sign_in(phone, phone_code_hash, current_code)
+                await cq.message.edit_text("✅ Авторизация успешна! Юзербот запущен в работу.")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+                asyncio.create_task(launch_userbot_instance(session_name))
+                
+            except SessionPasswordNeeded:
+                user_states[chat_id]["step"] = "WAIT_PASSWORD"
+                await cq.message.edit_text("🔒 На аккаунте включен облачный пароль (2FA).\n\nОтправь свой пароль сообщением в этот чат:")
+            except (PhoneCodeInvalid, PhoneCodeExpired):
+                await cq.message.edit_text("❌ Неверный или просроченный код. Попробуй заново через /start")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+            except Exception as e:
+                await cq.message.edit_text(f"❌ Ошибка при авторизации: {e}")
+                await client.disconnect()
+                user_states[chat_id] = {"step": "IDLE"}
+        else:
+            try:
+                await cq.message.edit_text(
+                    f"📲 Telegram отправил код на номер {state['phone']}.\n\n"
+                    f"**Код:** {format_code_display(current_code)}\n\n"
+                    f"Используй клавиатуру ниже для ввода:",
+                    reply_markup=get_pin_keyboard()
+                )
+            except Exception:
+                pass 
+            await cq.answer()
 
 async def main():
     if not API_ID or not API_HASH:
@@ -324,7 +395,7 @@ async def main():
         print("Запуск главного Сервисного Бот-Интерфейса...")
         try:
             bot_client = Client(
-                name="master_bot", # Новое имя для обхода кэша сломанной сессии
+                name="master_bot",
                 api_id=int(API_ID),
                 api_hash=API_HASH,
                 bot_token=BOT_TOKEN,
