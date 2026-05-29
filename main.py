@@ -22,7 +22,7 @@ GAME_BOT = "phonegetcardsbot"
 
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
 user_states = {}
 active_session_names = set()
@@ -211,7 +211,7 @@ async def launch_userbot_instance(session_name):
         asyncio.create_task(tcard_worker(client, session_name))
         asyncio.create_task(daily_and_mining_worker(client, session_name))
         active_session_names.add(session_name)
-        print(f" Юзербот {session_name} успешно запущен в работу!")
+        print(f"Юзербот {session_name} успешно запущен в работу!")
     except Exception as e:
         print(f"Ошибка при старте юзербота {session_name}: {e}")
 
@@ -220,6 +220,10 @@ async def init_existing_sessions():
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
+        # ЖЕСТКОЕ ИСКЛЮЧЕНИЕ: не пытаемся запустить сервисного бота как юзербота
+        if s_name == "master_bot":
+            continue
+            
         print(f"Найдена существующая сессия: {s_name}. Запуск...")
         asyncio.create_task(launch_userbot_instance(s_name))
 
@@ -279,7 +283,7 @@ def setup_bot_handlers(bot: Client):
             
             try:
                 await client.sign_in(phone, phone_code_hash, text)
-                await m.reply_text("Авторизация успешна! Файл сессии сохранен в Volume.")
+                await m.reply_text("Авторизация успешна! Файл сессии сохранен в Volume, юзербот запущен.")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
                 asyncio.create_task(launch_userbot_instance(session_name))
@@ -300,34 +304,37 @@ def setup_bot_handlers(bot: Client):
             session_name = state["session_name"]
             try:
                 await client.check_password(text)
-                await m.reply_text("Пароль принят! Авторизация успешна. Файл сессии сохранен в Volume.")
+                await m.reply_text("Пароль принят! Авторизация успешна. Файл сессии сохранен в Volume, юзербот запущен.")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
                 asyncio.create_task(launch_userbot_instance(session_name))
             except Exception as e:
-                await m.reply_text(f"Неверный пароль или ошибка: {e}. Попробуй процедуру заново через /start")
+                await m.reply_text(f"Неверный пароль или ошибка: {e}. Попробуй заново через /start")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
 
 async def main():
     if not API_ID or not API_HASH:
-        print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/OR API_HASH!")
+        print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/или API_HASH!")
         return
 
     asyncio.create_task(init_existing_sessions())
 
     if BOT_TOKEN:
         print("Запуск главного Сервисного Бот-Интерфейса...")
-        bot_client = Client(
-            name="auth_manager_bot",
-            api_id=int(API_ID),
-            api_hash=API_HASH,
-            bot_token=BOT_TOKEN,
-            workdir=SESSIONS_DIR
-        )
-        setup_bot_handlers(bot_client)
-        await bot_client.start()
-        print("Сервисный бот онлайн и готов принимать авторизации.")
+        try:
+            bot_client = Client(
+                name="master_bot", # Новое имя для обхода кэша сломанной сессии
+                api_id=int(API_ID),
+                api_hash=API_HASH,
+                bot_token=BOT_TOKEN,
+                workdir=SESSIONS_DIR
+            )
+            setup_bot_handlers(bot_client)
+            await bot_client.start()
+            print("Сервисный бот онлайн и готов принимать авторизации.")
+        except Exception as e:
+             print(f"КРИТИЧЕСКАЯ ОШИБКА СЕРВИСНОГО БОТА (Скорее всего неверный BOT_TOKEN): {e}")
     else:
         print("Внимание: Переменная BOT_TOKEN пуста. Добавление сессий через чат отключено.")
 
