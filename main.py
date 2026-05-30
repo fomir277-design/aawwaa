@@ -44,7 +44,7 @@ user_states    = {}
 active_clients = {}
 buy_states     = {}   # session_name -> {step, rarity, count, started}
 
-# Редкости: (Метка UI, Ключ в игре, Короткий код для кнопок)
+# Редкости для авто-покупки
 RARITIES = [
     ("Ширпотрёб",     "Ширпотреб",     "S"),
     ("Необычный",     "Необычный",     "N"),
@@ -59,7 +59,7 @@ RARITIES = [
 TCARD_INTERVALS = [185, 175, 165, 155, 145, 135, 125, 65]
 
 # ──────────────────────────────────────────────
-# Конфиг
+# Работа с конфигурацией
 # ──────────────────────────────────────────────
 
 def get_config_path(session_name):
@@ -90,8 +90,15 @@ def save_config(session_name, config):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=4)
 
+def find_session_by_user_id(user_id):
+    """Автоматически находит имя сессии по Telegram ID пользователя"""
+    for sess_name, client in active_clients.items():
+        if client.me and client.me.id == user_id:
+            return sess_name
+    return None
+
 # ──────────────────────────────────────────────
-# Вспомогательные корутины
+# Вспомогательные задачи (Воркеры)
 # ──────────────────────────────────────────────
 
 async def delayed_payment(client: Client, session_name: str):
@@ -104,7 +111,6 @@ async def delayed_payment(client: Client, session_name: str):
         print(f"[{session_name}] 💸 Отправлен перевод {amount} для {user}")
 
 async def send_shop_command(client: Client, session_name: str):
-    """Открывает магазин телефонов — первый шаг авто-покупки."""
     await asyncio.sleep(5)
     try:
         await client.send_message(GAME_BOT, "Магазин телефонов")
@@ -114,7 +120,7 @@ async def send_shop_command(client: Client, session_name: str):
         buy_states.pop(session_name, None)
 
 # ──────────────────────────────────────────────
-# Обработка сообщений от игрового бота
+# Обработка сообщений от игрового бота PhoneGet
 # ──────────────────────────────────────────────
 
 async def handle_bot_message(client: Client, message: Message):
@@ -184,12 +190,12 @@ async def handle_bot_message(client: Client, message: Message):
                                 buy_states.pop(session_name, None)
                             return
 
-    # ── Стандартные кнопки ─────────────────────────────────────────────────
+    # ── Стандартные игровые кнопки ─────────────────────────────────────────
     for row in message.reply_markup.inline_keyboard:
         for btn in row:
             cbs = cb_str(btn)
 
-            # 1. Сбор фермы
+            # 1. Авто-сбор фермы
             if "farm_claim" in cbs:
                 try:
                     await client.request_callback_answer(
@@ -210,12 +216,10 @@ async def handle_bot_message(client: Client, message: Message):
                         }
                         asyncio.create_task(send_shop_command(client, session_name))
                 except Exception as e:
-                    print(f"[{session_name}] Важная ошибка клика фермы: {e}")
+                    print(f"[{session_name}] Ошибка клика фермы: {e}")
 
             # 2. Ежедневная награда
-            elif config.get("eday_enabled") and (
-                "confirm_daily_claim" in cbs or "Забрать" in str(btn.text)
-            ):
+            elif config.get("eday_enabled") and ("confirm_daily_claim" in cbs or "Забрать" in str(btn.text)):
                 try:
                     if btn.callback_data:
                         await client.request_callback_answer(
@@ -225,11 +229,11 @@ async def handle_bot_message(client: Client, message: Message):
                         )
                     else:
                         await message.click(btn.text)
-                    print(f"[{session_name}] ✅ Ежедневная награда забрана")
+                    print(f"[{session_name}] ✅ Ежедневная награда зафиксирована")
                 except Exception as e:
-                    print(f"[{session_name}] Важная ошибка сбора ежедневки: {e}")
+                    print(f"[{session_name}] Ошибка сбора ежедневки: {e}")
 
-            # 3. Подтверждение перевода
+            # 3. Подтверждение исходящих переводов
             elif cbs.startswith("pay_confirm_"):
                 try:
                     parts = cbs.split("_")
@@ -264,10 +268,10 @@ async def handle_bot_message(client: Client, message: Message):
                                 )
                                 print(f"[{session_name}] ✅ Подтверждён перевод {btn_amount} ТОчек")
                 except Exception as e:
-                    print(f"[{session_name}] Важная ошибка обработки перевода: {e}")
+                    print(f"[{session_name}] Ошибка подтверждения перевода: {e}")
 
 # ──────────────────────────────────────────────
-# Команды ЮЗЕРБОТА
+# Текстовые команды ЮЗЕРБОТА
 # ──────────────────────────────────────────────
 
 async def handle_user_commands(client: Client, message: Message):
@@ -286,12 +290,12 @@ async def handle_user_commands(client: Client, message: Message):
     if command in [".on", ".вкл"]:
         config["enabled"] = True
         save_config(session_name, config)
-        await message.edit_text("✅ **Юзербот включён** и готов к работе.")
+        await message.edit_text("✅ **Юзербот включён** и активен.")
 
     elif command in [".off", ".выкл"]:
         config["enabled"] = False
         save_config(session_name, config)
-        await message.edit_text("❌ **Юзербот выключен.**")
+        await message.edit_text("❌ **Юзербот переведён в спящий режим.**")
 
     elif command in [".target", ".цель"]:
         if len(parts) >= 3:
@@ -301,140 +305,75 @@ async def handle_user_commands(client: Client, message: Message):
                 config["target_user"]   = target_user
                 config["target_amount"] = target_amount
 
-                msg = await message.edit_text("⏳ Сохраняем и проверяем ID цели…")
+                msg = await message.edit_text("⏳ Привязываем цель…")
                 try:
                     t_user_obj = await client.get_users(target_user)
                     config["target_user_id"] = t_user_obj.id
                     save_config(session_name, config)
                     await msg.edit_text(
-                        f"✅ **Настройки перевода сохранены:**\n"
-                        f"🎯 Цель: {target_user} (ID: `{t_user_obj.id}`)\n"
+                        f"✅ **Получатель настроен:**\n"
+                        f"🎯 Юзер: {target_user} (ID: `{t_user_obj.id}`)\n"
                         f"💰 Сумма: {target_amount} ТОчек"
                     )
                 except Exception:
                     save_config(session_name, config)
                     await msg.edit_text(
-                        f"✅ **Настройки сохранены** _(ID получим при первом переводе)_\n"
-                        f"🎯 Цель: {target_user}\n"
+                        f"✅ **Настройки сохранены** *(ID определится при первой транзакции)*\n"
+                        f"🎯 Юзер: {target_user}\n"
                         f"💰 Сумма: {target_amount} ТОчек"
                     )
             except ValueError:
-                await message.edit_text("❌ Сумма должна быть числом.\nПример: `.цель @username 500`")
+                await message.edit_text("❌ Сумма перевода должна быть числом.\nПример: `.цель @username 500`")
         else:
-            await message.edit_text("⚠️ Формат: `.цель @username <сумма>`")
+            await message.edit_text("⚠️ Использование: `.цель @username <сумма>`")
 
     elif command in [".tcard", ".ткарточка", ".buy", ".купить"]:
-        await message.edit_text("⚙️ **Настройка перенесена в Панель управления.**\nПерейди в личные сообщения сервисного бота и напиши `/config`.")
+        await message.edit_text("⚙️ **Настройки перенесены!**\nУправляй кнопками прямо в личке официального бота: @phonegetubot через команду `/config`.")
 
     elif command in [".eday", ".ежедн"]:
         config["eday_enabled"] = not config.get("eday_enabled", False)
         save_config(session_name, config)
-        status = "✅ включён" if config["eday_enabled"] else "❌ выключен"
-        await message.edit_text(f"🎁 Автосбор ежедневной награды: {status}.")
+        status = "включён" if config["eday_enabled"] else "выключен"
+        await message.edit_text(f"🎁 Автосбор ежедневки: **{status}**.")
 
     elif command in [".debug", ".дебаг"]:
         req_start = time.time()
-        await message.edit_text("⏳ Собираем данные…")
+        await message.edit_text("⏳ Считываем системные метрики…")
 
         ping_ms  = round((time.time() - req_start) * 1000)
         uptime   = int(time.time() - START_TIME)
-        u_h = uptime // 3600
-        u_m = (uptime % 3600) // 60
-        u_s = uptime % 60
+        u_h, u_m, u_s = uptime // 3600, (uptime % 3600) // 60, uptime % 60
 
         target = config.get("target_user")  or "❌ не задана"
         amount = config.get("target_amount") or "❌ не задана"
-
         tcard_st = f"✅ каждые {config['tcard_interval']} мин." if config.get("tcard_enabled") else "❌ выкл"
         eday_st = "✅ вкл" if config.get("eday_enabled") else "❌ выкл"
-        bot_st  = "✅ включён"  if config.get("enabled")   else "❌ выключен"
+        bot_st  = "✅ запущен" if config.get("enabled") else "❌ остановлен"
 
         if config.get("buy_enabled") and config.get("buy_rarity"):
-            rkey  = config["buy_rarity"]
+            rkey = config["buy_rarity"]
             rlabel = next((l for l, k, c in RARITIES if k == rkey), rkey)
             buy_st = f"✅ {rlabel} × {config.get('buy_count', 1)}"
         else:
             buy_st = "❌ выкл"
 
-        sess_list = "\n".join([f"• `{n}`" for n in active_clients.keys()]) or "• Нет активных сессий"
-
         await message.edit_text(
-            f"🛠 **PGUB Debug Info**\n"
+            f"🛠 **PGUB Debug Manger**\n"
             f"───────────────────\n"
             f"⏱️ **Аптайм:** {u_h}ч {u_m}м {u_s}с\n"
-            f"📡 **Ping:** {ping_ms} мс\n"
-            f"🐍 **Python:** {sys.version.split()[0]}\n"
+            f"📡 **Пинг:** {ping_ms} мс\n"
             f"───────────────────\n"
-            f"⚙️ **Настройки ({session_name}):**\n"
-            f"  🤖 Статус: {bot_st}\n"
-            f"  🎯 Цель перевода: {target}\n"
-            f"  💰 Сумма перевода: {amount}\n"
+            f"⚙️ **Конфиг сессии ({session_name}):**\n"
+            f"  🤖 Робот: {bot_st}\n"
+            f"  🎯 Получатель: {target}\n"
+            f"  💰 Сумма: {amount}\n"
             f"  🃏 ТКарточка: {tcard_st}\n"
-            f"  🎁 Ежедн. награда: {eday_st}\n"
-            f"  🛍 Авто-покупка: {buy_st}\n"
-            f"───────────────────\n"
-            f"**Активные сессии:**\n{sess_list}"
+            f"  🎁 Ежедневка: {eday_st}\n"
+            f"  🛍 Закупка: {buy_st}\n"
         )
-
-    elif command in [".help", ".помощь", ".справка", ".хелп"]:
-        await message.edit_text(
-            "**👾 Справка по командам Юзербота**\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🔠 **Латиница:**\n"
-            "`•` `.on` / `.off` — вкл/выкл бота\n"
-            "`•` `.tcard` / `.buy` — перейти к настройкам в сервисный бот\n"
-            "`•` `.eday` — авто-сбор ежедневной награды параллельно с фермой\n"
-            "`•` `.target <@user> <amount>` — цель и сумма перевода\n"
-            "`•` `.debug` — текущие настройки и пинг\n"
-            "`•` `.session` — список активных сессий\n"
-            "`•` `.delsession <имя>` — удалить сессию навсегда\n"
-            "`•` `.help` — эта справка\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🔤 **Кириллица:**\n"
-            "`•` `.вкл` / `.выкл` — вкл/выкл бота\n"
-            "`•` `.ткарточка` / `.купить` — перейти к настройкам в сервисный бот\n"
-            "`•` `.ежедн` — авто-сбор ежедневной награды параллельно с фермой\n"
-            "`•` `.цель <@user> <сумма>` — цель и сумма перевода\n"
-            "`•` `.дебаг` — текущие настройки и пинг\n"
-            "`•` `.сессии` — список активных сессий\n"
-            "`•` `.удалитьсессию <имя>` — удалить сессию навсегда\n"
-            "`•` `.хелп` — эта справка"
-        )
-
-    elif command in [".sessions", ".сессии", ".session"]:
-        sess_list = "\n".join([f"• `{n}`" for n in active_clients.keys()]) or "• Нет активных сессий"
-        await message.edit_text(f"📁 **Активные сессии:**\n{sess_list}")
-
-    elif command in [".delsession", ".удалитьсессию"]:
-        if len(parts) < 2:
-            await message.edit_text("❌ Укажи имя сессии.\nПример: `.удалитьсессию user_79991234567`")
-            return
-
-        target_sess = parts[1]
-        if target_sess == session_name:
-            await message.edit_text("❌ Нельзя удалить собственную активную сессию с этого же аккаунта.")
-            return
-
-        deleted = False
-        if target_sess in active_clients:
-            try: await active_clients[target_sess].stop()
-            except Exception: pass
-            del active_clients[target_sess]
-            deleted = True
-
-        sess_path = os.path.join(SESSIONS_DIR, f"{target_sess}.session")
-        if os.path.exists(sess_path):
-            os.remove(sess_path)
-            deleted = True
-
-        conf_path = get_config_path(target_sess)
-        if os.path.exists(conf_path): os.remove(conf_path)
-
-        if deleted: await message.edit_text(f"✅ Сессия `{target_sess}` остановлена и удалена с сервера.")
-        else: await message.edit_text(f"⚠️ Сессия `{target_sess}` не найдена.")
 
 # ──────────────────────────────────────────────
-# Воркеры
+# Фоновые циклы юзербота
 # ──────────────────────────────────────────────
 
 async def tcard_worker(client: Client, session_name: str):
@@ -442,15 +381,15 @@ async def tcard_worker(client: Client, session_name: str):
     while True:
         await asyncio.sleep(30)
         try:
-            config       = load_config(session_name)
+            config = load_config(session_name)
             interval_min = config.get("tcard_interval", 0)
             if config.get("enabled") and config.get("tcard_enabled") and interval_min > 0:
                 if time.time() - last_sent >= interval_min * 60:
                     await client.send_message(GAME_BOT, "ткарточка")
                     last_sent = time.time()
-                    print(f"[{session_name}] 🃏 ТКарточка отправлена (интервал: {interval_min} мин.)")
+                    print(f"[{session_name}] 🃏 ТКарточка отправлена")
         except Exception as e:
-            print(f"[{session_name}] Важная ошибка отправки ткарточки: {e}")
+            print(f"[{session_name}] Ошибка воркера ткарточки: {e}")
 
 async def daily_and_mining_worker(client: Client, session_name: str):
     msk = pytz.timezone("Europe/Moscow")
@@ -488,11 +427,11 @@ async def daily_and_mining_worker(client: Client, session_name: str):
 
                 await client.send_message(GAME_BOT, "тмайнинг")
         except Exception as e:
-            print(f"[{session_name}] Важная ошибка воркера майнинга: {e}")
+            print(f"[{session_name}] Ошибка воркера майнинга: {e}")
         await asyncio.sleep(60)
 
 # ──────────────────────────────────────────────
-# Запуск юзербота
+# Запуск инстансов юзерботов
 # ──────────────────────────────────────────────
 
 async def launch_userbot_instance(session_name):
@@ -516,7 +455,7 @@ async def launch_userbot_instance(session_name):
         asyncio.create_task(daily_and_mining_worker(client, session_name))
         print(f"Юзербот {session_name} успешно запущен!")
     except Exception as e:
-        print(f"Критическая ошибка при старте юзербота {session_name}: {e}")
+        print(f"Критическая ошибка старта юзербота {session_name}: {e}")
 
 async def init_existing_sessions():
     await asyncio.sleep(2)
@@ -524,11 +463,11 @@ async def init_existing_sessions():
     for f in files:
         s_name = f.replace(".session", "")
         if s_name in ["auth_manager_bot", "master_bot"]: continue
-        print(f"Найдена существующая сессия: {s_name}. Запуск…")
+        print(f"Авто-старт сессии: {s_name}…")
         asyncio.create_task(launch_userbot_instance(s_name))
 
 # ──────────────────────────────────────────────
-# СЕРВИСНЫЙ БОТ (MASTER BOT)
+# СЕРВИСНЫЙ БОТ (MASTER BOT @phonegetubot)
 # ──────────────────────────────────────────────
 
 def get_pin_keyboard():
@@ -552,128 +491,155 @@ def setup_bot_handlers(bot: Client):
     async def start_cmd(c, m):
         user_states[m.chat.id] = {"step": "IDLE"}
         await m.reply_text(
-            "Привет! Я пульт управления PGUB.\n\n"
-            "• Для авторизации юзербота — отправь номер телефона (напр. +79991234567).\n"
-            "• Для настройки функций — введи команду /config"
+            "👾 **Добро пожаловать в панель PGUB**\n\n"
+            "• Чтобы привязать новый аккаунт, просто отправь номер телефона (напр. +79991234567).\n"
+            "• Для изменения параметров работы используй команду /config"
         )
 
-    # === ПАНЕЛЬ УПРАВЛЕНИЯ (CONFIG) ===
+    # === АВТОМАТИЧЕСКАЯ НАСТРОЙКА (БЕЗ ВЫБОРА СЕССИЙ) ===
     @bot.on_message(filters.command("config") & filters.private)
     async def config_cmd(c, m):
-        sessions = [s for s in active_clients.keys() if s != "master_bot"]
-        if not sessions:
-            await m.reply_text("❌ Нет активных сессий юзерботов. Сначала авторизуй хотя бы один аккаунт.")
+        sess = find_session_by_user_id(m.chat.id)
+        if not sess:
+            await m.reply_text("❌ **Активная сессия не обнаружена.**\nПривяжи свой аккаунт юзербота, отправив номер телефона.")
             return
             
-        kb = [[InlineKeyboardButton(f"🤖 {s}", callback_data=f"cfg_sess_{s}")] for s in sessions]
-        await m.reply_text("⚙️ **Панель управления PGUB**\n\nВыбери сессию для настройки:", reply_markup=InlineKeyboardMarkup(kb))
+        cfg = load_config(sess)
+        t_st = f"каждые {cfg.get('tcard_interval')} мин." if cfg.get("tcard_enabled") else "Выкл"
+        
+        if cfg.get("buy_enabled") and cfg.get("buy_rarity"):
+            rkey = cfg["buy_rarity"]
+            rlabel = next((l for l, k, c in RARITIES if k == rkey), rkey)
+            b_st = f"{rlabel} × {cfg.get('buy_count', 1)} шт."
+        else:
+            b_st = "Выкл"
+            
+        kb = [
+            [InlineKeyboardButton("🃏 Настройка ТКарточки", callback_data="cfg_tcardmenu")],
+            [InlineKeyboardButton("🛍 Настройка Авто-покупки", callback_data="cfg_buymenu")]
+        ]
+        await m.reply_text(
+            f"⚙️ **Панель управления PGUB**\n\n"
+            f"👤 Текущий аккаунт: `{sess}`\n"
+            f"🃏 ТКарточка: **{t_st}**\n"
+            f"🛍 Авто-покупка: **{b_st}**\n\n"
+            f"Выбери раздел для изменения параметров:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
 
     @bot.on_callback_query(filters.regex(r"^cfg_"))
     async def config_callbacks(c, cq: CallbackQuery):
+        sess = find_session_by_user_id(cq.from_user.id)
+        if not sess:
+            await cq.answer("❌ Сессия не найдена. Перезапустите бота через /start", show_alert=True)
+            return
+            
         parts = cq.data.split("_")
         action = parts[1]
         
         if action == "main":
-            sessions = [s for s in active_clients.keys() if s != "master_bot"]
-            kb = [[InlineKeyboardButton(f"🤖 {s}", callback_data=f"cfg_sess_{s}")] for s in sessions]
-            await cq.message.edit_text("⚙️ **Панель управления PGUB**\n\nВыбери сессию для настройки:", reply_markup=InlineKeyboardMarkup(kb))
-            
-        elif action == "sess":
-            sess = parts[2]
             cfg = load_config(sess)
             t_st = f"каждые {cfg.get('tcard_interval')} мин." if cfg.get("tcard_enabled") else "Выкл"
-            b_st = "Включена" if cfg.get("buy_enabled") else "Выкл"
-            
+            if cfg.get("buy_enabled") and cfg.get("buy_rarity"):
+                rkey = cfg["buy_rarity"]
+                rlabel = next((l for l, k, c in RARITIES if k == rkey), rkey)
+                b_st = f"{rlabel} × {cfg.get('buy_count', 1)} шт."
+            else:
+                b_st = "Выкл"
+                
             kb = [
-                [InlineKeyboardButton("🃏 Настройка ТКарточки", callback_data=f"cfg_tcardmenu_{sess}")],
-                [InlineKeyboardButton("🛍 Настройка Авто-покупки", callback_data=f"cfg_buymenu_{sess}")],
-                [InlineKeyboardButton("🔙 Назад к списку", callback_data="cfg_main")]
+                [InlineKeyboardButton("🃏 Настройка ТКарточки", callback_data="cfg_tcardmenu")],
+                [InlineKeyboardButton("🛍 Настройка Авто-покупки", callback_data="cfg_buymenu")]
             ]
-            await cq.message.edit_text(f"⚙️ **Настройки сессии:** `{sess}`\n\n🃏 ТКарточка: {t_st}\n🛍 Авто-покупка: {b_st}", reply_markup=InlineKeyboardMarkup(kb))
+            await cq.message.edit_text(
+                f"⚙️ **Панель управления PGUB**\n\n"
+                f"👤 Текущий аккаунт: `{sess}`\n"
+                f"🃏 ТКарточка: **{t_st}**\n"
+                f"🛍 Авто-покупка: **{b_st}**",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
             
         elif action == "tcardmenu":
-            sess = parts[2]
-            kb = [[InlineKeyboardButton("🚫 Выключить ТКарточку", callback_data=f"cfg_tcardset_{sess}_0")]]
+            kb = [[InlineKeyboardButton("🚫 Выключить ТКарточку", callback_data="cfg_tcardset_0")]]
             row = []
             for m in TCARD_INTERVALS:
-                row.append(InlineKeyboardButton(f"{m} мин", callback_data=f"cfg_tcardset_{sess}_{m}"))
+                row.append(InlineKeyboardButton(f"{m} мин", callback_data=f"cfg_tcardset_{m}"))
                 if len(row) == 2:
                     kb.append(row)
                     row = []
             if row: kb.append(row)
-            kb.append([InlineKeyboardButton("🔙 Назад к профилю", callback_data=f"cfg_sess_{sess}")])
+            kb.append([InlineKeyboardButton("🔙 Назад", callback_data="cfg_main")])
             
-            await cq.message.edit_text(f"🃏 **ТКарточка** (`{sess}`)\n\nРаз в сколько минут вводить ТКарточку? (зависит от уровня прокачки)\n\n_Кулдаун команды — 180 мин., погрешность со стороны PhoneGet — 5 мин._", reply_markup=InlineKeyboardMarkup(kb))
+            await cq.message.edit_text(
+                f"🃏 **ТКарточка**\n\n"
+                f"Установи интервал отправки команды (зависит от твоих улучшений).\n\n"
+                f"Кулдаун команды — 180 мин., погрешность со стороны PhoneGet — 5 мин.", 
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
             
         elif action == "tcardset":
-            sess = parts[2]
-            val = int(parts[3])
+            val = int(parts[2])
             cfg = load_config(sess)
             cfg["tcard_enabled"] = (val > 0)
             cfg["tcard_interval"] = val
             save_config(sess, cfg)
             
             st = f"каждые {val} мин." if val > 0 else "отключена"
-            kb = [[InlineKeyboardButton("🔙 Вернуться к сессии", callback_data=f"cfg_sess_{sess}")]]
-            await cq.message.edit_text(f"✅ ТКарточка для `{sess}` **{st}**.", reply_markup=InlineKeyboardMarkup(kb))
+            kb = [[InlineKeyboardButton("🔙 Главное меню", callback_data="cfg_main")]]
+            await cq.message.edit_text(f"✅ Ввод ТКарточки успешно переведён в режим: **{st}**.", reply_markup=InlineKeyboardMarkup(kb))
             
         elif action == "buymenu":
-            sess = parts[2]
-            kb = [[InlineKeyboardButton("🚫 Отключить авто-покупку", callback_data=f"cfg_buyset_{sess}_OFF_0")]]
+            kb = [[InlineKeyboardButton("🚫 Отключить авто-покупку", callback_data="cfg_buyset_OFF_0")]]
             row = []
             for label, key, short in RARITIES:
-                row.append(InlineKeyboardButton(label, callback_data=f"cfg_buyrar_{sess}_{short}"))
+                row.append(InlineKeyboardButton(label, callback_data=f"cfg_buyrar_{short}"))
                 if len(row) == 2:
                     kb.append(row)
                     row = []
             if row: kb.append(row)
-            kb.append([InlineKeyboardButton("🔙 Назад к профилю", callback_data=f"cfg_sess_{sess}")])
+            kb.append([InlineKeyboardButton("🔙 Назад", callback_data="cfg_main")])
             
-            await cq.message.edit_text(f"🛍 **Авто-покупка телефонов** (`{sess}`)\n\nЧто вы хотите покупать при каждом сборе фермы?", reply_markup=InlineKeyboardMarkup(kb))
+            await cq.message.edit_text(f"🛍 **Авто-покупка телефонов**\n\nКакую категорию девайсов приобретать при каждом цикле сбора фермы?", reply_markup=InlineKeyboardMarkup(kb))
             
         elif action == "buyrar":
-            sess = parts[2]
-            short_code = parts[3]
+            short_code = parts[2]
             label = next((l for l, k, c in RARITIES if c == short_code), "Неизвестно")
             
             kb = []
             row = []
             for i in range(1, 26):
-                row.append(InlineKeyboardButton(str(i), callback_data=f"cfg_buyset_{sess}_{short_code}_{i}"))
+                row.append(InlineKeyboardButton(str(i), callback_data=f"cfg_buyset_{short_code}_{i}"))
                 if len(row) == 5:
                     kb.append(row)
                     row = []
-            kb.append([InlineKeyboardButton("🔙 Назад к выбору редкости", callback_data=f"cfg_buymenu_{sess}")])
+            kb.append([InlineKeyboardButton("🔙 Назад", callback_data="cfg_buymenu")])
             
-            await cq.message.edit_text(f"🛍 Редкость: **{label}**\n\nСколько штук покупать?", reply_markup=InlineKeyboardMarkup(kb))
+            await cq.message.edit_text(f"🛍 Выбрано: **{label}**\n\nУкажи объем закупки (количество за один раз):", reply_markup=InlineKeyboardMarkup(kb))
             
         elif action == "buyset":
-            sess = parts[2]
-            short_code = parts[3]
-            qty = parts[4]
+            short_code = parts[2]
+            qty = parts[3]
             cfg = load_config(sess)
             
             if short_code == "OFF":
                 cfg["buy_enabled"] = False
-                text = f"✅ Авто-покупка для `{sess}` отключена."
+                text = "✅ Авто-покупка устройств успешно деактивирована."
             else:
                 cfg["buy_enabled"] = True
                 real_key = next((k for l, k, c in RARITIES if c == short_code), None)
                 cfg["buy_rarity"] = real_key
                 cfg["buy_count"] = int(qty)
                 label = next((l for l, k, c in RARITIES if c == short_code), "Неизвестно")
-                text = f"✅ Авто-покупка для `{sess}` настроена!\n\nПри каждом сборе фермы бот будет автоматически открывать магазин и покупать:\n📦 **{label}** × **{qty} шт.**"
+                text = f"✅ **Авто-покупка настроена на ура!**\n\nТеперь после сбора прибыли бот возьмет:\n📦 Редкость: **{label}**\n🔢 Количество: **{qty} шт.**"
                 
             save_config(sess, cfg)
-            kb = [[InlineKeyboardButton("🔙 Вернуться к сессии", callback_data=f"cfg_sess_{sess}")]]
+            kb = [[InlineKeyboardButton("🔙 Главное меню", callback_data="cfg_main")]]
             await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
             
-        try:
-            await cq.answer()
-        except:
-            pass
+        try: await cq.answer()
+        except: pass
 
-    # === АВТОРИЗАЦИЯ ===
+    # === ИНТЕРАКТИВНЫЙ ВВОД КОДА АВТОРИЗАЦИИ ===
     @bot.on_message(filters.text & filters.private)
     async def process_auth(c, m):
         if m.text.startswith("/"): return
@@ -687,7 +653,7 @@ def setup_bot_handlers(bot: Client):
             if text.startswith("+") and len(text) > 9:
                 phone        = text.replace(" ", "")
                 session_name = f"user_{phone.replace('+', '')}"
-                await m.reply_text("Связываюсь с серверами Telegram, ожидайте… ⏳")
+                await m.reply_text("Устанавливаю соединение с Telegram… ⏳")
 
                 client = Client(name=session_name, workdir=SESSIONS_DIR, api_id=int(API_ID), api_hash=API_HASH, in_memory=False)
                 try:
@@ -702,22 +668,22 @@ def setup_bot_handlers(bot: Client):
                         "entered_code":    ""
                     }
                     await m.reply_text(
-                        f"📲 Telegram отправил код на номер {phone}.\n\n"
-                        f"**Код:** {format_code_display('')}\n\n"
-                        f"Используй клавиатуру ниже для ввода:",
+                        f"📲 Сгенерирован код для номера {phone}.\n\n"
+                        f"**Ввод:** {format_code_display('')}\n\n"
+                        f"Набирай цифры на кнопках ниже:",
                         reply_markup=get_pin_keyboard()
                     )
                 except FloodWait as e:
-                    await m.reply_text(f"⚠️ Превышен лимит запросов. Подожди {e.value} секунд.")
+                    await m.reply_text(f"⚠️ Ограничение Telegram. Подожди {e.value} сек.")
                     await client.disconnect()
                 except Exception as e:
-                    await m.reply_text(f"❌ Ошибка при отправке кода: {e}")
+                    await m.reply_text(f"❌ Ошибка отправки запроса: {e}")
                     await client.disconnect()
             else:
-                await m.reply_text("Неверный формат. Отправь номер телефона, начиная с `+`")
+                await m.reply_text("Номер должен начинаться с знака плюс, например: +79991234567")
 
         elif step == "WAIT_CODE":
-            msg = await m.reply_text("⚠️ Используй кнопки выше для безопасного ввода кода.")
+            msg = await m.reply_text("⚠️ Вводи код кнопками выше на экране.")
             await asyncio.sleep(3)
             await msg.delete()
 
@@ -726,12 +692,12 @@ def setup_bot_handlers(bot: Client):
             session_name = state["session_name"]
             try:
                 await client.check_password(text)
-                await m.reply_text("✅ Пароль принят! Авторизация успешна. Юзербот запущен.")
+                await m.reply_text("✅ Облачный пароль подтверждён. Юзербот инициализирован!")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
                 asyncio.create_task(launch_userbot_instance(session_name))
             except Exception as e:
-                await m.reply_text(f"❌ Неверный пароль или ошибка: {e}. Попробуй заново через /start")
+                await m.reply_text(f"❌ Сбой проверки 2FA: {e}. Перезапусти процесс через /start")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
 
@@ -741,7 +707,7 @@ def setup_bot_handlers(bot: Client):
         state   = user_states.get(chat_id)
 
         if not state or state.get("step") != "WAIT_CODE":
-            await cq.answer("Код больше не ожидается. Начни заново через /start", show_alert=True)
+            await cq.answer("Сессия устарела. Нажми /start", show_alert=True)
             return
 
         action       = cq.data.split("_")[1]
@@ -751,7 +717,7 @@ def setup_bot_handlers(bot: Client):
         if action == "cancel":
             await client.disconnect()
             user_states[chat_id] = {"step": "IDLE"}
-            await cq.message.edit_text("🛑 Авторизация отменена.")
+            await cq.message.edit_text("🛑 Сессия авторизации прервана.")
             return
         elif action == "clear":
             current_code = ""
@@ -764,47 +730,47 @@ def setup_bot_handlers(bot: Client):
         state["entered_code"] = current_code
 
         if len(current_code) == 5:
-            await cq.message.edit_text(f"🔐 Проверка кода: {format_code_display(current_code)} …")
+            await cq.message.edit_text(f"🔐 Проверяем код: {format_code_display(current_code)} …")
             try:
                 phone            = state["phone"]
                 phone_code_hash  = state["phone_code_hash"]
                 session_name     = state["session_name"]
 
                 await client.sign_in(phone, phone_code_hash, current_code)
-                await cq.message.edit_text("✅ Авторизация успешна! Юзербот запущен в работу.\n\nНажми /config чтобы настроить его.")
+                await cq.message.edit_text("✅ Профиль успешно синхронизирован! Юзербот запущен.\n\nНабери /config чтобы управлять им.")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
                 asyncio.create_task(launch_userbot_instance(session_name))
 
             except SessionPasswordNeeded:
                 user_states[chat_id]["step"] = "WAIT_PASSWORD"
-                await cq.message.edit_text("🔒 На аккаунте включён облачный пароль (2FA).\n\nОтправь свой пароль сообщением в этот чат:")
+                await cq.message.edit_text("🔒 Обнаружена двухфакторная аутентификация (2FA).\n\nНапиши ответным сообщением пароль от аккаунта:")
             except (PhoneCodeInvalid, PhoneCodeExpired):
-                await cq.message.edit_text("❌ Неверный или просроченный код. Попробуй заново через /start")
+                await cq.message.edit_text("❌ Код не прошёл валидацию. Попробуй заново через /start")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
             except Exception as e:
-                await cq.message.edit_text(f"❌ Ошибка при авторизации: {e}")
+                await cq.message.edit_text(f"❌ Критический сбой авторизации: {e}")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
         else:
             try:
                 await cq.message.edit_text(
-                    f"📲 Telegram отправил код на номер {state['phone']}.\n\n"
-                    f"**Код:** {format_code_display(current_code)}\n\n"
-                    f"Используй клавиатуру ниже для ввода:",
+                    f"📲 Сгенерирован код для номера {state['phone']}.\n\n"
+                    f"**Ввод:** {format_code_display(current_code)}\n\n"
+                    f"Набирай цифры на кнопках ниже:",
                     reply_markup=get_pin_keyboard()
                 )
             except Exception: pass
             await cq.answer()
 
 # ──────────────────────────────────────────────
-# Точка входа
+# Main Точка входа
 # ──────────────────────────────────────────────
 
 async def main():
     if not API_ID or not API_HASH:
-        print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/или API_HASH!")
+        print("КРИТИЧЕСКАЯ ОШИБКА: Не заданы API_ID или API_HASH в переменных окружения!")
         return
 
     loop = asyncio.get_event_loop()
@@ -845,9 +811,10 @@ async def main():
             setup_bot_handlers(bot_client)
             await bot_client.start()
             print("Сервисный бот онлайн и готов принимать авторизации.")
-        except Exception as e: print(f"КРИТИЧЕСКАЯ ОШИБКА СЕРВИСНОГО БОТА: {e}")
+        except Exception as e: 
+            print(f"КРИТИЧЕСКАЯ ОШИБКА СЕРВИСНОГО БОТА: {e}")
     else:
-        print("Внимание: BOT_TOKEN не задан. Авторизация через чат отключена.")
+        print("Внимание: BOT_TOKEN не задан.")
 
     await asyncio.Event().wait()
 
