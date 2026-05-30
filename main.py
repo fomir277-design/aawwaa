@@ -265,7 +265,9 @@ async def init_existing_sessions():
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
-        if s_name in ["auth_manager_bot", "master_bot"]: continue
+        # Добавляем master_bot_v2, чтобы скрипт не трогал этот файл
+        if s_name in ["auth_manager_bot", "master_bot", "master_bot_v2"]: 
+            continue
         asyncio.create_task(launch_userbot_instance(s_name))
 
 # ──────────────────────────────────────────────
