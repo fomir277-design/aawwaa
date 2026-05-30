@@ -84,7 +84,7 @@ def load_config(session_name):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        defaults.update(saved)   # новые поля получают дефолты, старые — из файла
+        defaults.update(saved)
     return defaults
 
 def save_config(session_name, config):
@@ -140,7 +140,6 @@ async def handle_bot_message(client: Client, message: Message):
     # ── Шаги авто-покупки ──────────────────────────────────────────────────
     buy_state = buy_states.get(session_name)
     if buy_state:
-        # Таймаут 5 минут — защита от зависания
         if time.time() - buy_state.get("started", 0) > 300:
             print(f"[{session_name}] ⚠️ Авто-покупка: таймаут, сбрасываем состояние.")
             buy_states.pop(session_name, None)
@@ -185,14 +184,13 @@ async def handle_bot_message(client: Client, message: Message):
                             except Exception as e:
                                 print(f"[{session_name}] Ошибка шага покупки [{step}]: {e}")
                                 buy_states.pop(session_name, None)
-                            return  # один клик на сообщение
+                            return
 
     # ── Стандартные кнопки ─────────────────────────────────────────────────
     for row in message.reply_markup.inline_keyboard:
         for btn in row:
             cbs = cb_str(btn)
 
-            # 1. Сбор фермы
             if "farm_claim" in cbs:
                 try:
                     await client.request_callback_answer(
@@ -203,7 +201,6 @@ async def handle_bot_message(client: Client, message: Message):
                     print(f"[{session_name}] ✅ Ферма собрана")
                     asyncio.create_task(delayed_payment(client, session_name))
 
-                    # Запуск авто-покупки
                     cfg = load_config(session_name)
                     if cfg.get("buy_enabled") and cfg.get("buy_rarity") and cfg.get("buy_count"):
                         buy_states[session_name] = {
@@ -216,10 +213,7 @@ async def handle_bot_message(client: Client, message: Message):
                 except Exception as e:
                     print(f"[{session_name}] Важная ошибка клика фермы: {e}")
 
-            # 2. Ежедневная награда
-            elif config.get("eday_enabled") and (
-                "confirm_daily_claim" in cbs or "Забрать" in str(btn.text)
-            ):
+            elif config.get("eday_enabled") and ("confirm_daily_claim" in cbs or "Забрать" in str(btn.text)):
                 try:
                     if btn.callback_data:
                         await client.request_callback_answer(
@@ -233,7 +227,6 @@ async def handle_bot_message(client: Client, message: Message):
                 except Exception as e:
                     print(f"[{session_name}] Важная ошибка сбора ежедневки: {e}")
 
-            # 3. Подтверждение перевода
             elif cbs.startswith("pay_confirm_"):
                 try:
                     parts = cbs.split("_")
@@ -280,14 +273,13 @@ async def handle_userbot_callback(client: Client, cq: CallbackQuery):
     config       = load_config(session_name)
 
     try:
-        # ── ТКарточка ──────────────────────────────────────────────────────
         if data == "ub_tcard_off":
             config["tcard_enabled"]  = False
             config["tcard_interval"] = 0
             save_config(session_name, config)
             await cq.message.edit_text(
                 "🃏 **Авто-ТКарточка отключена.**\n\n"
-                "Введи `.ткарточка` чтобы включить снова."
+                "Введи `.ткарточка`, чтобы включить снова."
             )
 
         elif data.startswith("ub_tcard_"):
@@ -298,19 +290,17 @@ async def handle_userbot_callback(client: Client, cq: CallbackQuery):
             await cq.message.edit_text(
                 f"🃏 **Авто-ТКарточка включена!**\n\n"
                 f"⏱ Интервал: каждые **{minutes} мин.**\n\n"
-                f"_Кулдаун команды — 180 мин., допустимая погрешность со стороны PhoneGet — ±5 мин._"
+                f"_Кулдаун команды — 180 мин., допустимая погрешность со стороны PhoneGet — 5 мин._"
             )
 
-        # ── Авто-покупка: отключить ────────────────────────────────────────
         elif data == "ub_buy_off":
             config["buy_enabled"] = False
             save_config(session_name, config)
             await cq.message.edit_text(
                 "🛍 **Авто-покупка отключена.**\n\n"
-                "Введи `.купить` чтобы настроить снова."
+                "Введи `.купить`, чтобы настроить снова."
             )
 
-        # ── Авто-покупка: выбор редкости ───────────────────────────────────
         elif data.startswith("ub_buy_rarity_"):
             rarity_key   = data[len("ub_buy_rarity_"):]
             rarity_label = next((l for l, k in RARITIES if k == rarity_key), rarity_key)
@@ -323,11 +313,10 @@ async def handle_userbot_callback(client: Client, cq: CallbackQuery):
 
             await cq.message.edit_text(
                 f"🛍 Редкость: **{rarity_label}**\n\n"
-                f"Сколько телефонов покупать при каждом сборе фермы?",
+                f"Сколько телефонов купить?",
                 reply_markup=InlineKeyboardMarkup(rows)
             )
 
-        # ── Авто-покупка: выбор количества ────────────────────────────────
         elif data.startswith("ub_buy_count_"):
             rest       = data[len("ub_buy_count_"):]
             sep        = rest.rfind("_")
@@ -373,19 +362,16 @@ async def handle_user_commands(client: Client, message: Message):
     session_name = client.name
     config       = load_config(session_name)
 
-    # .on / .вкл
     if command in [".on", ".вкл"]:
         config["enabled"] = True
         save_config(session_name, config)
         await message.edit_text("✅ **Юзербот включён** и готов к работе.")
 
-    # .off / .выкл
     elif command in [".off", ".выкл"]:
         config["enabled"] = False
         save_config(session_name, config)
         await message.edit_text("❌ **Юзербот выключен.**")
 
-    # .target / .цель
     elif command in [".target", ".цель"]:
         if len(parts) >= 3:
             target_user = parts[1]
@@ -419,46 +405,41 @@ async def handle_user_commands(client: Client, message: Message):
         else:
             await message.edit_text("⚠️ Формат: `.цель @username <сумма>`")
 
-    # .tcard / .ткарточка  —  меню выбора интервала
     elif command in [".tcard", ".ткарточка"]:
         keyboard = [
             [InlineKeyboardButton("🚫 Выключить ТКарточку", callback_data="ub_tcard_off")],
-            *[
-                [InlineKeyboardButton(f"каждые {m} мин.", callback_data=f"ub_tcard_{m}")]
-                for m in TCARD_INTERVALS
-            ],
+            [InlineKeyboardButton("каждые 185 минут", callback_data="ub_tcard_185"), InlineKeyboardButton("каждые 175 минут", callback_data="ub_tcard_175")],
+            [InlineKeyboardButton("каждые 165 минут", callback_data="ub_tcard_165"), InlineKeyboardButton("каждые 155 минут", callback_data="ub_tcard_155")],
+            [InlineKeyboardButton("каждые 145 минут", callback_data="ub_tcard_145"), InlineKeyboardButton("каждые 135 минут", callback_data="ub_tcard_135")],
+            [InlineKeyboardButton("каждые 125 минут", callback_data="ub_tcard_125"), InlineKeyboardButton("каждые 65 минут", callback_data="ub_tcard_65")]
         ]
         await message.edit_text(
             "🃏 **Авто-ТКарточка**\n\n"
-            "Раз в сколько минут вводить ТКарточку?\n"
-            "_(зависит от уровня персонажа)_",
+            "Раз в сколько минут вводить ТКарточку? (зависит от уровня прокачки)\n\n"
+            "_Кулдаун команды — 180 мин., допустимая погрешность со стороны PhoneGet — 5 мин._",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-    # .buy / .купить  —  меню выбора редкости
     elif command in [".buy", ".купить"]:
         keyboard = [
             [InlineKeyboardButton("🚫 Отключить авто-покупку", callback_data="ub_buy_off")],
-            *[
-                [InlineKeyboardButton(label, callback_data=f"ub_buy_rarity_{key}")]
-                for label, key in RARITIES
-            ],
+            [InlineKeyboardButton("Ширпотрёб", callback_data="ub_buy_rarity_Ширпотреб"), InlineKeyboardButton("Необычный", callback_data="ub_buy_rarity_Необычный")],
+            [InlineKeyboardButton("Редкий", callback_data="ub_buy_rarity_Редкий"), InlineKeyboardButton("Мистический", callback_data="ub_buy_rarity_Мистический")],
+            [InlineKeyboardButton("Хроматический", callback_data="ub_buy_rarity_Хроматический"), InlineKeyboardButton("Аркана", callback_data="ub_buy_rarity_Аркана")],
+            [InlineKeyboardButton("Платиновый", callback_data="ub_buy_rarity_Платиновый")]
         ]
         await message.edit_text(
             "🛍 **Авто-покупка телефонов**\n\n"
-            "Что покупать при каждом сборе фермы?\n"
-            "Выбери редкость:",
+            "Что вы хотите покупать при каждом сборе фермы?",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-    # .eday / .ежедн
     elif command in [".eday", ".ежедн"]:
         config["eday_enabled"] = not config.get("eday_enabled", False)
         save_config(session_name, config)
         status = "✅ включён" if config["eday_enabled"] else "❌ выключен"
         await message.edit_text(f"🎁 Автосбор ежедневной награды: {status}.")
 
-    # .debug / .дебаг
     elif command in [".debug", ".дебаг"]:
         req_start = time.time()
         await message.edit_text("⏳ Собираем данные…")
@@ -507,7 +488,6 @@ async def handle_user_commands(client: Client, message: Message):
             f"**Активные сессии:**\n{sess_list}"
         )
 
-    # .help / .помощь / .справка / .хелп
     elif command in [".help", ".помощь", ".справка", ".хелп"]:
         await message.edit_text(
             "**👾 Справка по командам Юзербота**\n"
@@ -537,12 +517,10 @@ async def handle_user_commands(client: Client, message: Message):
             "`•` `.хелп` — эта справка"
         )
 
-    # .sessions / .сессии / .session
     elif command in [".sessions", ".сессии", ".session"]:
         sess_list = "\n".join([f"• `{n}`" for n in active_clients.keys()]) or "• Нет активных сессий"
         await message.edit_text(f"📁 **Активные сессии:**\n{sess_list}")
 
-    # .delsession / .удалитьсессию
     elif command in [".delsession", ".удалитьсессию"]:
         if len(parts) < 2:
             await message.edit_text(
@@ -585,7 +563,6 @@ async def handle_user_commands(client: Client, message: Message):
 # ──────────────────────────────────────────────
 
 async def tcard_worker(client: Client, session_name: str):
-    """Отправляет ткарточку с настроенным интервалом. Проверяет состояние каждые 30 сек."""
     last_sent = 0.0
     while True:
         await asyncio.sleep(30)
