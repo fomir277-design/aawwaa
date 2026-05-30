@@ -11,6 +11,25 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import SessionPasswordNeeded, FloodWait, PhoneCodeInvalid, PhoneCodeExpired
 
+# --- Глушитель мусорных ошибок Pyrogram ---
+def custom_exception_handler(loop, context):
+    exc = context.get('exception')
+    msg = context.get('message', '')
+    
+    # Если это та самая ошибка Peer ID / ID not found - просто игнорируем
+    if exc:
+        exc_str = str(exc)
+        if isinstance(exc, ValueError) and "Peer id invalid" in exc_str:
+            return
+        if isinstance(exc, KeyError) and "ID not found" in exc_str:
+            return
+    if "Peer id invalid" in msg or "ID not found" in msg:
+        return
+        
+    # Все остальные важные ошибки пускаем дальше в консоль
+    loop.default_exception_handler(context)
+# ------------------------------------------
+
 sys.stdout.reconfigure(line_buffering=True)
 
 START_TIME = time.time()
@@ -88,7 +107,7 @@ async def handle_bot_message(client: Client, message: Message):
                         print(f"[{session_name}] Успешно нажата инлайн-кнопка фермы")
                         asyncio.create_task(delayed_payment(client, session_name))
                     except Exception as e:
-                        print(f"[{session_name}] Ошибка клика farm_claim: {e}")
+                        print(f"[{session_name}] Важная ошибка клика фермы: {e}")
                 
                 # 2. Ежедневная награда
                 elif config.get("eday_enabled") and ("confirm_daily_claim" in cb_str or "Забрать" in str(button.text)):
@@ -103,12 +122,11 @@ async def handle_bot_message(client: Client, message: Message):
                             await message.click(button.text)
                         print(f"[{session_name}] Успешно забрана ежедневная награда")
                     except Exception as e:
-                        print(f"[{session_name}] Ошибка клика eday: {e}")
+                        print(f"[{session_name}] Важная ошибка сбора ежедневки: {e}")
                         
                 # 3. ПОДТВЕРЖДЕНИЕ ПЕРЕВОДА
                 elif cb_str.startswith("pay_confirm_"):
                     try:
-                        # Формат: pay_confirm_{TARGET_ID}_{AMOUNT}_{SENDER_ID}
                         parts = cb_str.split("_")
                         if len(parts) >= 5:
                             btn_target_id = int(parts[2])
@@ -118,15 +136,12 @@ async def handle_bot_message(client: Client, message: Message):
                             my_id = client.me.id
                             conf_amount = config.get("target_amount", 0)
                             
-                            # Проверяем, что это наш перевод и сумма сходится
                             if btn_sender_id == my_id and btn_amount == conf_amount:
                                 target_match = False
                                 
-                                # Проверяем получателя
                                 if "target_user_id" in config:
                                     target_match = (btn_target_id == config["target_user_id"])
                                 else:
-                                    # Если ID нет в конфиге (старая база), пробуем узнать сейчас
                                     conf_target = config.get("target_user")
                                     if conf_target:
                                         try:
@@ -137,7 +152,6 @@ async def handle_bot_message(client: Client, message: Message):
                                         except Exception:
                                             pass
                                             
-                                # Финальное подтверждение
                                 if target_match:
                                     await client.request_callback_answer(
                                         chat_id=message.chat.id,
@@ -145,10 +159,8 @@ async def handle_bot_message(client: Client, message: Message):
                                         callback_data=button.callback_data
                                     )
                                     print(f"[{session_name}] ✅ Успешно подтвержден перевод {btn_amount} ТОчек")
-                                else:
-                                    print(f"[{session_name}] ⚠️ ID получателя не совпал с целью. Пропуск.")
                     except Exception as e:
-                        print(f"[{session_name}] Ошибка обработки подтверждения перевода: {e}")
+                        print(f"[{session_name}] Важная ошибка обработки перевода: {e}")
 
 async def handle_user_commands(client: Client, message: Message):
     if not message.text:
@@ -186,13 +198,11 @@ async def handle_user_commands(client: Client, message: Message):
                 msg = await message.edit_text("⏳ Сохранение и проверка ID цели...")
                 
                 try:
-                    # Пытаемся сразу получить ID цели и сохранить для безопасности
                     t_user_obj = await client.get_users(target_user)
                     config["target_user_id"] = t_user_obj.id
                     save_config(session_name, config)
                     await msg.edit_text(f"✅ **Настройки перевода сохранены:**\n🎯 Цель: {target_user} (ID: `{t_user_obj.id}`)\n💰 Сумма: {target_amount}")
-                except Exception as e:
-                    # Если юзербот не общался с целью, может быть ошибка, но мы всё равно сохраняем
+                except Exception:
                     save_config(session_name, config)
                     await msg.edit_text(f"✅ **Настройки сохранены (ID будет получен при переводе):**\n🎯 Цель: {target_user}\n💰 Сумма: {target_amount}")
             except ValueError:
@@ -237,48 +247,44 @@ async def handle_user_commands(client: Client, message: Message):
 ⏱️ **Аптайм:** {u_h}ч {u_m}м {u_s}с
 📡 **Telegram Ping:** {ping_ms} ms
 🐍 **Python:** {sys.version.split()[0]}
-🖥 **Платформа:** {platform.system()} {platform.release()}
 ───────────────────
 ⚙️ **Настройки ({session_name}):**
   🤖 Статус бота: {bot_st}
   🎯 Цель перевода: {target}
   💰 Сумма перевода: {amount}
   🃏 ТКарточка: {tcard_st}
-  🎁 Ежедн. награда: {eday_st}
-
-📁 **Активные сессии на сервере:**
-{sess_list}"""
+  🎁 Ежедн. награда: {eday_st}"""
         await message.edit_text(debug_text)
         
     elif command in [".help", ".помощь", ".справка", ".хелп"]:
-            help_text = """**👾 Справка по командам Юзербота**
-    ━━━━━━━━━━━━━━━━━━━━━━
-    🔠 **Латиница:**
-    `•` `.on` — включает бота (возвращает крайние настройки)
-    `•` `.off` — выключает бота
-    `•` `.tcard` — авто-«ТКарточка» каждые 187 мин*
-    `•` `.eday` — сбор ежедн. награды параллельно с фермой
-    `•` `.target <@user> <amount>` — цель и сумма перевода
-    `•` `.debug` — настройки юзербота и пинг
-    `•` `.session` — список действующих сессий (БД)
-    `•` `.delsession <имя>` — удаляет сессию навсегда
-    `•` `.help` — эта справка
+        help_text = """**👾 Справка по командам Юзербота**
+━━━━━━━━━━━━━━━━━━━━━━
+🔠 **Латиница:**
+`•` `.on` — включает бота (возвращает крайние настройки)
+`•` `.off` — выключает бота
+`•` `.tcard` — авто-«ТКарточка» каждые 187 мин*
+`•` `.eday` — сбор ежедн. награды параллельно с фермой
+`•` `.target <@user> <amount>` — цель и сумма перевода
+`•` `.debug` — настройки юзербота и пинг
+`•` `.session` — список действующих сессий (БД)
+`•` `.delsession <имя>` — удаляет сессию навсегда
+`•` `.help` — эта справка
 
-    ━━━━━━━━━━━━━━━━━━━━━━
-    🔤 **Кириллица:**
-    `•` `.вкл` — включает бота (возвращает крайние настройки)
-    `•` `.выкл` — выключает бота
-    `•` `.ткарточка` — авто-«ТКарточка» каждые 187 мин*
-    `•` `.ежедн` — сбор ежедн. награды параллельно с фермой
-    `•` `.цель <@user> <сумма>` — цель и сумма перевода
-    `•` `.дебаг` — настройки юзербота и пинг
-    `•` `.сессии` — список действующих сессий (БД)
-    `•` `.удалитьсессию <имя>` — удаляет сессию навсегда
-    `•` `.хелп` — эта справка
+━━━━━━━━━━━━━━━━━━━━━━
+🔤 **Кириллица:**
+`•` `.вкл` — включает бота (возвращает крайние настройки)
+`•` `.выкл` — выключает бота
+`•` `.ткарточка` — авто-«ТКарточка» каждые 187 мин*
+`•` `.ежедн` — сбор ежедн. награды параллельно с фермой
+`•` `.цель <@user> <сумма>` — цель и сумма перевода
+`•` `.дебаг` — настройки юзербота и пинг
+`•` `.сессии` — список действующих сессий (БД)
+`•` `.удалитьсессию <имя>` — удаляет сессию навсегда
+`•` `.хелп` — эта справка
 
-    _ * 180 мин. — кулдаун, 7 мин. — погрешность со стороны PhoneGet._"""
-            await message.edit_text(help_text)
-            
+_ * 180 мин. — кулдаун, 7 мин. — погрешность со стороны PhoneGet._"""
+        await message.edit_text(help_text)
+        
     elif command in [".sessions", ".сессии", ".session"]:
         sess_list = "\n".join([f"• `{name}`" for name in active_clients.keys()])
         if not sess_list:
@@ -297,7 +303,6 @@ async def handle_user_commands(client: Client, message: Message):
             return
             
         deleted = False
-        
         if target_sess in active_clients:
             try:
                 await active_clients[target_sess].stop()
@@ -327,7 +332,7 @@ async def tcard_worker(client: Client, session_name: str):
             if config.get("enabled") and config.get("tcard_enabled"):
                 await client.send_message(GAME_BOT, "ткарточка")
         except Exception as e:
-            print(f"[{session_name}] Ошибка tcard_worker: {e}")
+            print(f"[{session_name}] Важная ошибка отправки ткарточки: {e}")
         await asyncio.sleep(187 * 60)
 
 async def daily_and_mining_worker(client: Client, session_name: str):
@@ -370,7 +375,7 @@ async def daily_and_mining_worker(client: Client, session_name: str):
                 
                 await client.send_message(GAME_BOT, "тмайнинг")
         except Exception as e:
-            print(f"[{session_name}] Ошибка daily_and_mining_worker: {e}")
+            print(f"[{session_name}] Важная ошибка воркера майнинга: {e}")
         await asyncio.sleep(60)
 
 async def launch_userbot_instance(session_name):
@@ -394,28 +399,28 @@ async def launch_userbot_instance(session_name):
             await handle_bot_message(c, m)
             
         await client.start()
+        
+        # Прогрев кэша для надежности
+        try:
+            async for _ in client.get_dialogs(limit=20):
+                pass
+        except Exception:
+            pass
+            
         active_clients[session_name] = client
         asyncio.create_task(tcard_worker(client, session_name))
         asyncio.create_task(daily_and_mining_worker(client, session_name))
         print(f"Юзербот {session_name} успешно запущен в работу!")
     except Exception as e:
-        print(f"Ошибка при старте юзербота {session_name}: {e}")
+        print(f"Критическая ошибка при старте юзербота {session_name}: {e}")
 
 async def init_existing_sessions():
     await asyncio.sleep(2)
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
-        
-        if s_name == "auth_manager_bot":
-            try:
-                os.remove(os.path.join(SESSIONS_DIR, f))
-            except: pass
+        if s_name in ["auth_manager_bot", "master_bot"]:
             continue
-            
-        if s_name == "master_bot":
-            continue
-            
         print(f"Найдена существующая сессия: {s_name}. Запуск...")
         asyncio.create_task(launch_userbot_instance(s_name))
 
@@ -581,6 +586,10 @@ async def main():
         print("КРИТИЧЕСКАЯ ОШИБКА: Не указаны API_ID и/или API_HASH!")
         return
 
+    # Устанавливаем наш глушитель мусорных ошибок
+    loop = asyncio.get_event_loop()
+    loop.set_exception_handler(custom_exception_handler)
+
     session_envs = {k: v for k, v in os.environ.items() if k.startswith("SESSION_STRING")}
     for key, string_value in session_envs.items():
         if not string_value.strip():
@@ -605,6 +614,14 @@ async def main():
                 await handle_bot_message(c, m)
                 
             await client.start()
+            
+            # Прогрев кэша для сессий из памяти
+            try:
+                async for _ in client.get_dialogs(limit=20):
+                    pass
+            except Exception:
+                pass
+                
             active_clients[s_name] = client
             asyncio.create_task(tcard_worker(client, s_name))
             asyncio.create_task(daily_and_mining_worker(client, s_name))
