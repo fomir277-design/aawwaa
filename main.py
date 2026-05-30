@@ -74,11 +74,12 @@ async def handle_bot_message(client: Client, message: Message):
     if message.reply_markup and message.reply_markup.inline_keyboard:
         for row in message.reply_markup.inline_keyboard:
             for button in row:
-                cb_str = str(button.callback_data) if button.callback_data else ""
+                cb_data = button.callback_data
+                cb_str = cb_data.decode('utf-8') if isinstance(cb_data, bytes) else str(cb_data) if cb_data else ""
                 
+                # 1. Сбор фермы
                 if "farm_claim" in cb_str:
                     try:
-                        # Прямой низкоуровневый запрос (бьет точно в цель)
                         await client.request_callback_answer(
                             chat_id=message.chat.id,
                             message_id=message.id,
@@ -89,6 +90,7 @@ async def handle_bot_message(client: Client, message: Message):
                     except Exception as e:
                         print(f"[{session_name}] Ошибка клика farm_claim: {e}")
                 
+                # 2. Ежедневная награда
                 elif config.get("eday_enabled") and ("confirm_daily_claim" in cb_str or "Забрать" in str(button.text)):
                     try:
                         if button.callback_data:
@@ -98,10 +100,55 @@ async def handle_bot_message(client: Client, message: Message):
                                 callback_data=button.callback_data
                             )
                         else:
-                            await message.click(button.text) # Фолбэк на случай изменения кнопки
+                            await message.click(button.text)
                         print(f"[{session_name}] Успешно забрана ежедневная награда")
                     except Exception as e:
                         print(f"[{session_name}] Ошибка клика eday: {e}")
+                        
+                # 3. ПОДТВЕРЖДЕНИЕ ПЕРЕВОДА
+                elif cb_str.startswith("pay_confirm_"):
+                    try:
+                        # Формат: pay_confirm_{TARGET_ID}_{AMOUNT}_{SENDER_ID}
+                        parts = cb_str.split("_")
+                        if len(parts) >= 5:
+                            btn_target_id = int(parts[2])
+                            btn_amount = int(parts[3])
+                            btn_sender_id = int(parts[4])
+                            
+                            my_id = client.me.id
+                            conf_amount = config.get("target_amount", 0)
+                            
+                            # Проверяем, что это наш перевод и сумма сходится
+                            if btn_sender_id == my_id and btn_amount == conf_amount:
+                                target_match = False
+                                
+                                # Проверяем получателя
+                                if "target_user_id" in config:
+                                    target_match = (btn_target_id == config["target_user_id"])
+                                else:
+                                    # Если ID нет в конфиге (старая база), пробуем узнать сейчас
+                                    conf_target = config.get("target_user")
+                                    if conf_target:
+                                        try:
+                                            t_user = await client.get_users(conf_target)
+                                            config["target_user_id"] = t_user.id
+                                            save_config(session_name, config)
+                                            target_match = (btn_target_id == t_user.id)
+                                        except Exception:
+                                            pass
+                                            
+                                # Финальное подтверждение
+                                if target_match:
+                                    await client.request_callback_answer(
+                                        chat_id=message.chat.id,
+                                        message_id=message.id,
+                                        callback_data=button.callback_data
+                                    )
+                                    print(f"[{session_name}] ✅ Успешно подтвержден перевод {btn_amount} ТОчек")
+                                else:
+                                    print(f"[{session_name}] ⚠️ ID получателя не совпал с целью. Пропуск.")
+                    except Exception as e:
+                        print(f"[{session_name}] Ошибка обработки подтверждения перевода: {e}")
 
 async def handle_user_commands(client: Client, message: Message):
     if not message.text:
@@ -129,14 +176,25 @@ async def handle_user_commands(client: Client, message: Message):
         return
         
     elif command in [".target", ".цель"]:
-        if len(parts) == 3:
+        if len(parts) >= 3:
             target_user = parts[1]
             try:
                 target_amount = int(parts[2])
                 config["target_user"] = target_user
                 config["target_amount"] = target_amount
-                save_config(session_name, config)
-                await message.edit_text(f"✅ **Настройки перевода сохранены:**\n🎯 Цель: {target_user}\n💰 Сумма: {target_amount}")
+                
+                msg = await message.edit_text("⏳ Сохранение и проверка ID цели...")
+                
+                try:
+                    # Пытаемся сразу получить ID цели и сохранить для безопасности
+                    t_user_obj = await client.get_users(target_user)
+                    config["target_user_id"] = t_user_obj.id
+                    save_config(session_name, config)
+                    await msg.edit_text(f"✅ **Настройки перевода сохранены:**\n🎯 Цель: {target_user} (ID: `{t_user_obj.id}`)\n💰 Сумма: {target_amount}")
+                except Exception as e:
+                    # Если юзербот не общался с целью, может быть ошибка, но мы всё равно сохраняем
+                    save_config(session_name, config)
+                    await msg.edit_text(f"✅ **Настройки сохранены (ID будет получен при переводе):**\n🎯 Цель: {target_user}\n💰 Сумма: {target_amount}")
             except ValueError:
                 await message.edit_text("❌ Ошибка: Сумма перевода должна быть числом.")
         else:
@@ -331,11 +389,9 @@ async def init_existing_sessions():
     for f in files:
         s_name = f.replace(".session", "")
         
-        # Авто-удаление сломанного файла из прошлых версий, чтобы не валил логи
         if s_name == "auth_manager_bot":
             try:
                 os.remove(os.path.join(SESSIONS_DIR, f))
-                print("Удален старый мусорный файл auth_manager_bot.session")
             except: pass
             continue
             
