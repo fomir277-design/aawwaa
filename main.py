@@ -691,7 +691,13 @@ async def main():
     if BOT_TOKEN:
         print("Запуск Сервисного Бот-Интерфейса…")
         try:
-            bot_client = Client(name="master_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=SESSIONS_DIR)
+            bot_client = Client(
+                name="master_bot_v2",  # <-- Изменили имя с "master_bot" на "master_bot_v2"
+                api_id=int(API_ID),
+                api_hash=API_HASH,
+                bot_token=BOT_TOKEN,
+                workdir=SESSIONS_DIR
+            )
             setup_bot_handlers(bot_client)
             await bot_client.start()
             print("Сервисный бот онлайн и готов принимать команды.")
