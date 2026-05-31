@@ -46,6 +46,9 @@ API_ID   = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
+# Список ID главных администраторов
+ADMIN_IDS = [8209965013, 8300484469, 6118149728]
+
 user_states    = {}
 active_clients = {}
 buy_states     = {}
@@ -291,7 +294,6 @@ async def launch_userbot_instance(session_name):
             lang_code="ru"
         )
         
-        # Решение бага с EOF Error: проверяем авторизацию перед полным стартом
         await client.connect()
         me = await client.get_me()
         if not me:
@@ -323,7 +325,7 @@ async def init_existing_sessions():
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
-        # Исключаем мастер-бота (решение проблемы "database is locked")
+        # Исключаем мастер-бота
         if s_name in ["auth_manager_bot", "master_bot", "master_bot_v2"] or s_name.endswith("bot"):
             continue
         asyncio.create_task(launch_userbot_instance(s_name))
@@ -365,8 +367,13 @@ def setup_bot_handlers(bot: Client):
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(c, m):
         user_states[m.chat.id] = {"step": "IDLE"}
+        
+        greeting = "📟 **PGUB CORE SYSTEM**"
+        if m.chat.id in ADMIN_IDS:
+            greeting += " 👑 **(РЕЖИМ АДМИНА)**"
+            
         await m.reply_text(
-            "📟 **PGUB CORE SYSTEM**\n\n"
+            f"{greeting}\n\n"
             "Доступные команды терминала:\n"
             "**/auth** (или /авторизация) — Авторизовать новый аккаунт\n"
             "**/config** (или /настройки) — Открыть панель управления",
@@ -392,19 +399,24 @@ def setup_bot_handlers(bot: Client):
         if text.lower() in ["/config", "/настройки"]:
             user_states[chat_id] = {"step": "IDLE"}
             
-            # Решение бага с чужими конфигами: Ищем сессии только этого пользователя
-            user_sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+            # Логика прав доступа: Админы видят всё, юзеры - только своё
+            if chat_id in ADMIN_IDS:
+                user_sessions = [s for s in active_clients.keys() if s not in ["auth_manager_bot", "master_bot", "master_bot_v2"]]
+                admin_badge = " 👑 **(АДМИН)**"
+            else:
+                user_sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+                admin_badge = ""
             
             sess = user_states.get(chat_id, {}).get("editing_sess")
             if not sess or sess not in user_sessions:
                 if user_sessions:
                     sess = user_sessions[0]
                 else:
-                    await m.reply_text("❌ **У вас нет активных сессий.** Напиши /auth для авторизации.", reply_markup=ReplyKeyboardRemove())
+                    await m.reply_text("❌ **Нет доступных сессий.** Напиши /auth для авторизации.", reply_markup=ReplyKeyboardRemove())
                     return
                     
             user_states[chat_id]["editing_sess"] = sess
-            await m.reply_text(f"📟 **ПАНЕЛЬ УПРАВЛЕНИЯ**\n\n🟣 **Сессия:** `{sess}`", reply_markup=get_main_keyboard(sess))
+            await m.reply_text(f"📟 **ПАНЕЛЬ УПРАВЛЕНИЯ**{admin_badge}\n\n🟣 **Сессия:** `{sess}`", reply_markup=get_main_keyboard(sess))
             return
 
         if text.lower() in ["/auth", "/авторизация"]:
@@ -470,7 +482,6 @@ def setup_bot_handlers(bot: Client):
             try:
                 await client.check_password(text)
                 
-                # Закрепляем сессию за создателем
                 cfg = load_config(session_name)
                 cfg["owner_id"] = chat_id
                 save_config(session_name, cfg)
@@ -567,7 +578,6 @@ def setup_bot_handlers(bot: Client):
                 await client.sign_in(state["phone"], state["phone_code_hash"], current_code)
                 sess = state["session_name"]
                 
-                # Закрепляем сессию за создателем
                 cfg = load_config(sess)
                 cfg["owner_id"] = chat_id
                 save_config(sess, cfg)
@@ -612,7 +622,8 @@ def setup_bot_handlers(bot: Client):
 
         if data == "cfg_main":
             user_states[chat_id]["step"] = "IDLE"
-            await cq.message.edit_text(f"📟 **ПАНЕЛЬ УПРАВЛЕНИЯ**\n\n🟣 **Сессия:** `{sess}`", reply_markup=get_main_keyboard(sess))
+            admin_badge = " 👑 **(АДМИН)**" if chat_id in ADMIN_IDS else ""
+            await cq.message.edit_text(f"📟 **ПАНЕЛЬ УПРАВЛЕНИЯ**{admin_badge}\n\n🟣 **Сессия:** `{sess}`", reply_markup=get_main_keyboard(sess))
 
         elif data == "cfg_toggle":
             cfg["enabled"] = not cfg.get("enabled")
@@ -713,15 +724,27 @@ def setup_bot_handlers(bot: Client):
 
         elif data.startswith("cfg_sesslist_"):
             page = int(data.split("_")[2])
-            # Показываем только сессии текущего пользователя
-            sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+            
+            if chat_id in ADMIN_IDS:
+                sessions = [s for s in active_clients.keys() if s not in ["auth_manager_bot", "master_bot", "master_bot_v2"]]
+            else:
+                sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+                
             per_page = 10
             total_pages = max(1, (len(sessions) + per_page - 1) // per_page)
             current_sessions = sessions[page * per_page : (page + 1) * per_page]
             
-            text = f"📋 **ВАШИ АКТИВНЫЕ СЕССИИ (Стр. {page+1}/{total_pages})**\n\n"
+            if chat_id in ADMIN_IDS:
+                text = f"👑 **ВСЕ СЕССИИ (АДМИН)** (Стр. {page+1}/{total_pages})\n\n"
+            else:
+                text = f"📋 **ВАШИ АКТИВНЫЕ СЕССИИ** (Стр. {page+1}/{total_pages})\n\n"
+                
             for s in current_sessions: 
-                text += f"• `{s}`\n"
+                if chat_id in ADMIN_IDS:
+                    owner = load_config(s).get("owner_id", "неизв.")
+                    text += f"• `{s}` (ID: {owner})\n"
+                else:
+                    text += f"• `{s}`\n"
             
             nav_row = []
             if page > 0: 
@@ -735,8 +758,12 @@ def setup_bot_handlers(bot: Client):
 
         elif data.startswith("cfg_sessmanage_"):
             page = int(data.split("_")[2])
-            # Показываем только сессии текущего пользователя
-            sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+            
+            if chat_id in ADMIN_IDS:
+                sessions = [s for s in active_clients.keys() if s not in ["auth_manager_bot", "master_bot", "master_bot_v2"]]
+            else:
+                sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+                
             per_page = 10
             total_pages = max(1, (len(sessions) + per_page - 1) // per_page)
             current_sessions = sessions[page * per_page : (page + 1) * per_page]
@@ -752,14 +779,22 @@ def setup_bot_handlers(bot: Client):
                 kb.append(nav_row)
             
             kb.append([InlineKeyboardButton("🔙 Назад в меню", callback_data="cfg_main")])
+            
+            header = "👑 **МЕНЕДЖЕР СЕССИЙ (АДМИН)**" if chat_id in ADMIN_IDS else "🗂 **МЕНЕДЖЕР СЕССИЙ**"
             await cq.message.edit_text(
-                f"🗂 **МЕНЕДЖЕР СЕССИЙ (Стр. {page+1}/{total_pages})**\n\n"
-                f"Выбери сессию для управления:", 
+                f"{header} (Стр. {page+1}/{total_pages})\n\nВыбери сессию для управления:", 
                 reply_markup=InlineKeyboardMarkup(kb)
             )
 
         elif data.startswith("cfg_select_"):
             selected_sess = data.replace("cfg_select_", "")
+            
+            # Проверка безопасности (защита от прямой отправки callback_data)
+            if chat_id not in ADMIN_IDS:
+                if load_config(selected_sess).get("owner_id") != chat_id:
+                    await cq.answer("❌ У вас нет прав на эту сессию!", show_alert=True)
+                    return
+                    
             user_states[chat_id]["editing_sess"] = selected_sess
             kb = [
                 [InlineKeyboardButton("📝 Переименовать", callback_data="cfg_rename")],
@@ -804,14 +839,18 @@ def setup_bot_handlers(bot: Client):
             if os.path.exists(p_conf): 
                 os.remove(p_conf)
             
-            fallback = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+            if chat_id in ADMIN_IDS:
+                fallback = [s for s in active_clients.keys() if s not in ["auth_manager_bot", "master_bot", "master_bot_v2"]]
+            else:
+                fallback = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+                
             new_sess = fallback[0] if fallback else None
             user_states[chat_id]["editing_sess"] = new_sess
             
             if new_sess:
                 await cq.message.edit_text(f"✅ Сессия `{sess}` уничтожена.", reply_markup=get_main_keyboard(new_sess))
             else:
-                await cq.message.edit_text(f"✅ Сессия `{sess}` уничтожена. Ваших активных аккаунтов больше нет. Используй /auth")
+                await cq.message.edit_text(f"✅ Сессия `{sess}` уничтожена. Доступных аккаунтов больше нет. Используй /auth")
 
         try: 
             await cq.answer()
