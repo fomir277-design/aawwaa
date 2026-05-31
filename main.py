@@ -7,7 +7,11 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, 
+    CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, 
+    ReplyKeyboardRemove
+)
 from pyrogram.errors import SessionPasswordNeeded, FloodWait, PhoneCodeInvalid, PhoneCodeExpired
 
 # --- Глушитель мусорных ошибок Pyrogram ---
@@ -66,6 +70,7 @@ def get_config_path(session_name):
 
 def load_config(session_name):
     defaults = {
+        "owner_id":         None, # Привязка к владельцу
         "enabled":          True,
         "target_user":      None,
         "target_amount":    0,
@@ -86,12 +91,6 @@ def load_config(session_name):
 def save_config(session_name, config):
     with open(get_config_path(session_name), "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=4)
-
-def find_session_by_user_id(user_id):
-    for sess_name, client in active_clients.items():
-        if client.me and client.me.id == user_id:
-            return sess_name
-    return None
 
 # ──────────────────────────────────────────────
 # Воркеры и задачи
@@ -185,9 +184,7 @@ async def handle_bot_message(client: Client, message: Message):
 
     def cb_str(button):
         raw = button.callback_data
-        if raw is None:
-            return ""
-        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw or "")
 
     buy_state = buy_states.get(session_name)
     if buy_state:
@@ -281,7 +278,27 @@ async def launch_userbot_instance(session_name):
     if session_name in active_clients:
         return
     try:
-        client = Client(name=session_name, workdir=SESSIONS_DIR, api_id=int(API_ID), api_hash=API_HASH, plugins=None)
+        # Подмена устройства на iPhone для решения проблемы с кодами
+        client = Client(
+            name=session_name, 
+            workdir=SESSIONS_DIR, 
+            api_id=int(API_ID), 
+            api_hash=API_HASH, 
+            plugins=None,
+            device_model="iPhone 15 Pro Max",
+            system_version="17.4.1",
+            app_version="10.12",
+            lang_code="ru"
+        )
+        
+        # Решение бага с EOF Error: проверяем авторизацию перед полным стартом
+        await client.connect()
+        me = await client.get_me()
+        if not me:
+            print(f"[{session_name}] Сессия не авторизована. Пропускаем старт во избежание EOF.")
+            await client.disconnect()
+            return
+        await client.disconnect()
         
         @client.on_message(filters.chat(GAME_BOT))
         async def b_handler(c, m):
@@ -306,7 +323,8 @@ async def init_existing_sessions():
     files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith(".session")]
     for f in files:
         s_name = f.replace(".session", "")
-        if s_name in ["auth_manager_bot", "master_bot"]:
+        # Исключаем мастер-бота (решение проблемы "database is locked")
+        if s_name in ["auth_manager_bot", "master_bot", "master_bot_v2"] or s_name.endswith("bot"):
             continue
         asyncio.create_task(launch_userbot_instance(s_name))
 
@@ -351,42 +369,77 @@ def setup_bot_handlers(bot: Client):
             "📟 **PGUB CORE SYSTEM**\n\n"
             "Доступные команды терминала:\n"
             "**/auth** (или /авторизация) — Авторизовать новый аккаунт\n"
-            "**/config** (или /настройки) — Открыть панель управления"
+            "**/config** (или /настройки) — Открыть панель управления",
+            reply_markup=ReplyKeyboardRemove()
         )
 
-    # ── ОБРАБОТКА ВСЕГО ТЕКСТА ──
-    @bot.on_message(filters.text & filters.private)
-    async def process_text(c, m):
-        text = m.text.strip()
+    # ── ОБРАБОТКА ВСЕГО ТЕКСТА И КОНТАКТОВ ──
+    @bot.on_message((filters.text | filters.contact) & filters.private)
+    async def process_text_or_contact(c, m):
         chat_id = m.chat.id
         state = user_states.get(chat_id, {"step": "IDLE"})
         step = state.get("step")
 
+        text = ""
+        if m.text:
+            text = m.text.strip()
+        elif m.contact:
+            text = m.contact.phone_number
+
+        if not text:
+            return
+
         if text.lower() in ["/config", "/настройки"]:
             user_states[chat_id] = {"step": "IDLE"}
-            sess = find_session_by_user_id(m.from_user.id)
-            if not sess:
-                if active_clients:
-                    sess = list(active_clients.keys())[0]
+            
+            # Решение бага с чужими конфигами: Ищем сессии только этого пользователя
+            user_sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
+            
+            sess = user_states.get(chat_id, {}).get("editing_sess")
+            if not sess or sess not in user_sessions:
+                if user_sessions:
+                    sess = user_sessions[0]
                 else:
-                    await m.reply_text("❌ **Нет активных сессий.** Напиши /auth для авторизации.")
+                    await m.reply_text("❌ **У вас нет активных сессий.** Напиши /auth для авторизации.", reply_markup=ReplyKeyboardRemove())
                     return
+                    
             user_states[chat_id]["editing_sess"] = sess
             await m.reply_text(f"📟 **ПАНЕЛЬ УПРАВЛЕНИЯ**\n\n🟣 **Сессия:** `{sess}`", reply_markup=get_main_keyboard(sess))
             return
 
         if text.lower() in ["/auth", "/авторизация"]:
             user_states[chat_id] = {"step": "WAIT_PHONE"}
-            await m.reply_text("📟 **ТЕРМИНАЛ АВТОРИЗАЦИИ**\n\nВведи номер телефона в формате `+79991234567`:")
+            keyboard = ReplyKeyboardMarkup(
+                [[KeyboardButton("📱 Поделиться номером", request_contact=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+            await m.reply_text(
+                "📟 **ТЕРМИНАЛ АВТОРИЗАЦИИ**\n\nВведи номер телефона в формате `+79991234567` или нажми кнопку ниже:",
+                reply_markup=keyboard
+            )
             return
 
         # ── ОБРАБОТКА СОСТОЯНИЙ ──
         if step == "WAIT_PHONE":
-            if text.startswith("+") and len(text) > 9:
-                phone = text.replace(" ", "")
+            if text.startswith("+") or text.isdigit():
+                phone = text.replace(" ", "").replace("+", "")
+                phone = "+" + phone
                 session_name = f"user_{phone.replace('+', '')}"
-                await m.reply_text("Устанавливаю соединение… ⏳")
-                client = Client(name=session_name, workdir=SESSIONS_DIR, api_id=int(API_ID), api_hash=API_HASH, in_memory=False)
+                
+                await m.reply_text("Устанавливаю соединение… ⏳", reply_markup=ReplyKeyboardRemove())
+                
+                client = Client(
+                    name=session_name, 
+                    workdir=SESSIONS_DIR, 
+                    api_id=int(API_ID), 
+                    api_hash=API_HASH, 
+                    in_memory=False,
+                    device_model="iPhone 15 Pro Max",
+                    system_version="17.4.1",
+                    app_version="10.12",
+                    lang_code="ru"
+                )
                 try:
                     await client.connect()
                     code_info = await client.send_code(phone)
@@ -404,17 +457,24 @@ def setup_bot_handlers(bot: Client):
                     await m.reply_text(f"❌ Ошибка: {e}")
                     await client.disconnect()
             else:
-                await m.reply_text("❌ Номер должен начинаться с `+`.")
+                await m.reply_text("❌ Неверный формат номера.")
 
         elif step == "WAIT_CODE":
-            msg = await m.reply_text("⚠️ Вводи код инлайн-кнопками выше.")
-            await asyncio.sleep(3)
-            await msg.delete()
+            if m.text:
+                msg = await m.reply_text("⚠️ Вводи код инлайн-кнопками выше.")
+                await asyncio.sleep(3)
+                await msg.delete()
 
         elif step == "WAIT_PASSWORD":
             client, session_name = state["client"], state["session_name"]
             try:
                 await client.check_password(text)
+                
+                # Закрепляем сессию за создателем
+                cfg = load_config(session_name)
+                cfg["owner_id"] = chat_id
+                save_config(session_name, cfg)
+
                 await m.reply_text("✅ 2FA подтвержден. Запускаю юзербота...\nОткрой настройки через **/config**")
                 await client.disconnect()
                 user_states[chat_id] = {"step": "IDLE"}
@@ -451,7 +511,7 @@ def setup_bot_handlers(bot: Client):
         elif step == "WAIT_RENAME":
             old_sess = state.get("editing_sess")
             new_sess = text.replace(" ", "_")
-            if new_sess in active_clients or new_sess in ["auth_manager_bot", "master_bot"]:
+            if new_sess in active_clients or new_sess in ["auth_manager_bot", "master_bot", "master_bot_v2"]:
                 await m.reply_text("❌ Имя занято или недопустимо. Придумай другое:")
                 return
                 
@@ -506,6 +566,12 @@ def setup_bot_handlers(bot: Client):
             try:
                 await client.sign_in(state["phone"], state["phone_code_hash"], current_code)
                 sess = state["session_name"]
+                
+                # Закрепляем сессию за создателем
+                cfg = load_config(sess)
+                cfg["owner_id"] = chat_id
+                save_config(sess, cfg)
+
                 user_states[chat_id] = {"step": "IDLE", "editing_sess": sess}
                 await client.disconnect()
                 await cq.message.edit_text("✅ **Синхронизация завершена.**", reply_markup=get_main_keyboard(sess))
@@ -566,7 +632,7 @@ def setup_bot_handlers(bot: Client):
         elif data == "cfg_debug":
             uptime = int(time.time() - START_TIME)
             u_h, u_m, u_s = uptime // 3600, (uptime % 3600) // 60, uptime % 60
-            t_st = f"✅ {cfg['tcard_interval']} мин." if cfg.get("tcard_enabled") else "❌ выкл"
+            t_st = f"✅ {cfg.get('tcard_interval', 0)} мин." if cfg.get("tcard_enabled") else "❌ выкл"
             if cfg.get("buy_enabled") and cfg.get("buy_rarity"):
                 rlabel = next((l for l, k, c in RARITIES if k == cfg["buy_rarity"]), cfg["buy_rarity"])
                 b_st = f"✅ {rlabel} × {cfg.get('buy_count', 1)}"
@@ -647,12 +713,13 @@ def setup_bot_handlers(bot: Client):
 
         elif data.startswith("cfg_sesslist_"):
             page = int(data.split("_")[2])
-            sessions = [s for s in active_clients.keys() if s != "master_bot"]
+            # Показываем только сессии текущего пользователя
+            sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
             per_page = 10
             total_pages = max(1, (len(sessions) + per_page - 1) // per_page)
             current_sessions = sessions[page * per_page : (page + 1) * per_page]
             
-            text = f"📋 **АКТИВНЫЕ СЕССИИ (Стр. {page+1}/{total_pages})**\n\n"
+            text = f"📋 **ВАШИ АКТИВНЫЕ СЕССИИ (Стр. {page+1}/{total_pages})**\n\n"
             for s in current_sessions: 
                 text += f"• `{s}`\n"
             
@@ -668,7 +735,8 @@ def setup_bot_handlers(bot: Client):
 
         elif data.startswith("cfg_sessmanage_"):
             page = int(data.split("_")[2])
-            sessions = [s for s in active_clients.keys() if s != "master_bot"]
+            # Показываем только сессии текущего пользователя
+            sessions = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
             per_page = 10
             total_pages = max(1, (len(sessions) + per_page - 1) // per_page)
             current_sessions = sessions[page * per_page : (page + 1) * per_page]
@@ -736,14 +804,14 @@ def setup_bot_handlers(bot: Client):
             if os.path.exists(p_conf): 
                 os.remove(p_conf)
             
-            fallback = [s for s in active_clients.keys() if s != "master_bot"]
+            fallback = [s for s in active_clients.keys() if load_config(s).get("owner_id") == chat_id]
             new_sess = fallback[0] if fallback else None
             user_states[chat_id]["editing_sess"] = new_sess
             
             if new_sess:
                 await cq.message.edit_text(f"✅ Сессия `{sess}` уничтожена.", reply_markup=get_main_keyboard(new_sess))
             else:
-                await cq.message.edit_text(f"✅ Сессия `{sess}` уничтожена. Активных аккаунтов больше нет. Используй /auth")
+                await cq.message.edit_text(f"✅ Сессия `{sess}` уничтожена. Ваших активных аккаунтов больше нет. Используй /auth")
 
         try: 
             await cq.answer()
@@ -769,7 +837,18 @@ async def main():
         if s_name in active_clients:
             continue
         try:
-            client = Client(name=s_name, session_string=string_value.strip(), api_id=int(API_ID), api_hash=API_HASH, plugins=None, in_memory=True)
+            client = Client(
+                name=s_name, 
+                session_string=string_value.strip(), 
+                api_id=int(API_ID), 
+                api_hash=API_HASH, 
+                plugins=None, 
+                in_memory=True,
+                device_model="iPhone 15 Pro Max",
+                system_version="17.4.1",
+                app_version="10.12",
+                lang_code="ru"
+            )
             @client.on_message(filters.chat(GAME_BOT))
             @client.on_edited_message(filters.chat(GAME_BOT))
             async def b_handler(c, m):
